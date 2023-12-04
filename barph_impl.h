@@ -293,7 +293,7 @@ static byte_buffer_t super_big_rle_decompress(const uint8_t * input, size_t inpu
                 uint8_t c = input[i++];
                 byte_push_many(&ret, c, n);
             }
-            // long word mode (note: n will be at most 16)
+            // long word mode (note: n will be at most 63)
             else
             {
                 size_t rle_size = input[i++] + 2;
@@ -392,8 +392,7 @@ static bit_buffer_t huff_pack(uint8_t * data, size_t len)
     
     // count bytes, then sort them
     // we stuff the byte identity into the bottom 8 bits
-    uint64_t counts[256];
-    memset(counts, 0, sizeof(uint64_t) * 256);
+    uint64_t counts[256] = {0};
     for (size_t i = 0; i < len; i += 1)
         counts[data[i]] += 256;
     for (size_t b = 0; b < 256; b++)
