@@ -120,7 +120,7 @@ int is_pow_2(unsigned int x)
 
 int has_simple_rle(const uint8_t * input, size_t input_len)
 {
-    for (size_t size = 1; size <= 16; size += 1)
+    for (size_t size = 1; size <= 4; size += 1)
     {
         if (size * 2 > input_len)
             break;
@@ -274,12 +274,9 @@ typedef struct _huff_node {
     uint8_t symbol;
 } huff_node_t;
 
-huff_node_t huff_pool[2048];
-size_t huff_pool_i = 0;
 huff_node_t * alloc_huff_node()
 {
-    return &huff_pool[huff_pool_i++];
-    //return malloc(sizeof(huff_node_t));
+    return malloc(sizeof(huff_node_t));
 }
 
 void push_code(huff_node_t * node, uint8_t bit)
@@ -375,6 +372,9 @@ bit_buffer_t huff_pack(uint8_t * data, size_t len)
         queue_in[i] = unordered_dict[i];
     for (size_t i = 0; i < 256; i += 1)
         queue_out[i] = 0;
+    
+    while (queue_in[queue_in_count - 1]->freq == 0 && queue_in_count > 0)
+        queue_in_count -= 1;
     
     while (queue_in_count + queue_out_count > 1)
     {
@@ -475,6 +475,11 @@ int main(int argc, char ** argv)
         return 0;
     }
     FILE * f = fopen(argv[2], "rb");
+    if (!f)
+    {
+        puts("error: failed to open input file");
+        return 0;
+    }
     fseek(f, 0, SEEK_END);
     size_t file_len = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -485,30 +490,33 @@ int main(int argc, char ** argv)
     
     fclose(f);
     
+    int do_rle = 0;
+    int do_huff = 1;
+    
     if (argv[1][0] == 'z')
     {
-        byte_buffer_t rle_compressed = super_big_rle_compress(buf.data, buf.len);
-        bit_buffer_t huff_compressed = huff_pack(rle_compressed.data, rle_compressed.len);
+        if (do_rle)
+            buf = super_big_rle_compress(buf.data, buf.len);
+        if (do_huff)
+            buf = huff_pack(buf.data, buf.len).buffer;
         
         FILE * f2 = fopen(argv[3], "wb");
-        //fwrite(rle_compressed.data, rle_compressed.len, 1, f2);
-        fwrite(huff_compressed.buffer.data, huff_compressed.buffer.len, 1, f2);
+        fwrite(buf.data, buf.len, 1, f2);
         fclose(f2);
     }
     else if (argv[1][0] == 'x')
     {
-        bit_buffer_t compressed = (bit_buffer_t){buf, 0, 0, 0};
-        puts("unpacking huff data...");
-        byte_buffer_t huff_decompressed = huff_unpack(&compressed);
-        puts("unpacking rle data...");
-        byte_buffer_t decompressed = super_big_rle_decompress(huff_decompressed.data, huff_decompressed.len);
-        
-        //byte_buffer_t decompressed = super_big_rle_decompress(buf.data, buf.len);
+        if (do_huff)
+        {
+            bit_buffer_t compressed = (bit_buffer_t){buf, 0, 0, 0};
+            buf = huff_unpack(&compressed);
+        }
+        if (do_rle)
+            buf = super_big_rle_decompress(buf.data, buf.len);
         
         FILE * f2 = fopen(argv[3], "wb");
-        //fwrite(huff_decompressed.data, 1, huff_decompressed.len, f2);
         puts("saving...");
-        fwrite(decompressed.data, decompressed.len, 1, f2);
+        fwrite(buf.data, buf.len, 1, f2);
         fclose(f2);
     }
     
