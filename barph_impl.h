@@ -537,6 +537,8 @@ static byte_buffer_t huff_unpack(bit_buffer_t * buf)
 // returned data must be freed by the caller; it was allocated with BARPH_MALLOC
 static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_rle, uint8_t do_huff, uint8_t do_diff, size_t * out_len)
 {
+    if (!data || !out_len) return 0;
+    
     byte_buffer_t buf = {data, len, len};
     
     const uint32_t big_prime = 0x1011B0D5;
@@ -585,6 +587,8 @@ static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_rle, uint
 // returned data must be freed by the caller; it was allocated with BARPH_MALLOC
 static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
 {
+    if (!data || !out_len) return 0;
+    
     byte_buffer_t buf = {data, len, len};
     
     if (buf.len < 8 || memcmp(buf.data, "bRPH", 5) != 0)
