@@ -1,2 +1,7 @@
 *.out
 *.exe
+*.wav
+*.lz4
+*.tga
+*.zip
+*.barph
