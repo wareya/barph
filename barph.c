@@ -335,6 +335,31 @@ huff_node_t * pop_huff_node(bit_buffer_t * buf)
     return ret;
 }
 
+void huff_to_table(huff_node_t * huff, uint16_t ** table, size_t * len)
+{
+    size_t start = *len;
+    *len += 3;
+    *table = realloc(*table, sizeof(uint16_t) * *len);
+    
+    if (huff->children[0] || huff->children[1])
+    {
+        huff_to_table(huff->children[0], table, len);
+        size_t left_len = *len - start;
+        
+        huff_to_table(huff->children[1], table, len);
+        
+        (*table)[start    ] = 3;
+        (*table)[start + 1] = left_len;
+        (*table)[start + 2] = 0;
+    }
+    else
+    {
+        (*table)[start    ] = 0;
+        (*table)[start + 1] = 0;
+        (*table)[start + 2] = huff->symbol;
+    }
+}
+
 bit_buffer_t huff_pack(uint8_t * data, size_t len)
 {
     // generate dictionary
@@ -454,6 +479,10 @@ byte_buffer_t huff_unpack(bit_buffer_t * buf)
     
     huff_node_t * root = pop_huff_node(buf);
     
+    uint16_t * table = 0;
+    size_t table_len = 0;
+    huff_to_table(root, &table, &table_len);
+    
     printf("unpacking at... %d %lld\n", buf->bit_index, buf->byte_index);
     
     for(size_t i = 0; i < len; i++)
@@ -463,6 +492,13 @@ byte_buffer_t huff_unpack(bit_buffer_t * buf)
         while (node->children[0])
             node = node->children[bit_pop(buf)];
         byte_push(&ret, node->symbol);
+        /*
+        uint16_t * node = table;
+        node += node[bit_pop(buf)];
+        while (node[0])
+            node += node[bit_pop(buf)];
+        byte_push(&ret, node[2]);
+        */
     }
     return ret;
 }
