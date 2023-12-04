@@ -3,6 +3,19 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifndef BARPH_REALLOC
+#define BARPH_REALLOC realloc
+#endif
+
+#ifndef BARPH_MALLOC
+#define BARPH_MALLOC malloc
+#endif
+
+#ifndef BARPH_FREE
+#define BARPH_FREE free
+#endif
+
+
 typedef struct {
     uint8_t * data;
     size_t len;
@@ -15,7 +28,7 @@ static void bytes_reserve(byte_buffer_t * buf, size_t extra)
         buf->cap = 8;
     while (buf->len + extra > buf->cap)
         buf->cap <<= 1;
-    buf->data = (uint8_t *)realloc(buf->data, buf->cap);
+    buf->data = (uint8_t *)BARPH_REALLOC(buf->data, buf->cap);
 }
 static void bytes_push(byte_buffer_t * buf, const uint8_t * bytes, size_t count)
 {
@@ -36,7 +49,7 @@ static void byte_push(byte_buffer_t * buf, uint8_t byte)
         buf->cap = buf->cap << 1;
         if (buf->cap < 8)
             buf->cap = 8;
-        buf->data = (uint8_t *)realloc(buf->data, buf->cap);
+        buf->data = (uint8_t *)BARPH_REALLOC(buf->data, buf->cap);
     }
     buf->data[buf->len] = byte;
     buf->len += 1;
@@ -305,7 +318,16 @@ typedef struct _huff_node {
 
 static huff_node_t * alloc_huff_node()
 {
-    return (huff_node_t *)malloc(sizeof(huff_node_t));
+    return (huff_node_t *)BARPH_MALLOC(sizeof(huff_node_t));
+}
+
+static void free_huff_nodes(huff_node_t * node)
+{
+    if (node->children[0])
+        free_huff_nodes(node->children[0]);
+    if (node->children[1])
+        free_huff_nodes(node->children[1]);
+    BARPH_FREE(node);
 }
 
 static void push_code(huff_node_t * node, uint8_t bit)
@@ -409,7 +431,10 @@ static bit_buffer_t huff_pack(uint8_t * data, size_t len)
     
     // remove zero-frequency items from the input queue
     while (queue_in[queue_in_count - 1]->freq == 0 && queue_in_count > 0)
+    {
+        free_huff_nodes(queue_in[queue_in_count - 1]);
         queue_in_count -= 1;
+    }
     
     // start pumping through the queues
     while (queue_in_count + queue_out_count > 1)
@@ -479,6 +504,8 @@ static bit_buffer_t huff_pack(uint8_t * data, size_t len)
         }
     }
     
+    free_huff_nodes(queue_out[0]);
+    
     return ret;
 }
 
@@ -501,9 +528,13 @@ static byte_buffer_t huff_unpack(bit_buffer_t * buf)
             node = node->children[bit_pop(buf)];
         byte_push(&ret, node->symbol);
     }
+    
+    free_huff_nodes(root);
+    
     return ret;
 }
 
+// returned data must be freed by the caller; it was allocated with BARPH_MALLOC
 static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_rle, uint8_t do_huff, uint8_t do_diff, size_t * out_len)
 {
     byte_buffer_t buf = {data, len, len};
@@ -514,13 +545,22 @@ static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_rle, uint
             buf.data[i] -= buf.data[i - do_diff];
     }
     if (do_rle)
-        buf = super_big_rle_compress(buf.data, buf.len);
+    {
+        byte_buffer_t new_buf = super_big_rle_compress(buf.data, buf.len);
+        BARPH_FREE(buf.data);
+        buf = new_buf;
+    }
     if (do_huff)
-        buf = huff_pack(buf.data, buf.len).buffer;
+    {
+        byte_buffer_t new_buf = huff_pack(buf.data, buf.len).buffer;
+        BARPH_FREE(buf.data);
+        buf = new_buf;
+    }
     
     *out_len = buf.len;
     return buf.data;
 }
+// returned data must be freed by the caller; it was allocated with BARPH_MALLOC
 static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
 {
     byte_buffer_t buf = {data, len, len};
@@ -539,20 +579,21 @@ static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
     
     if (do_huff)
     {
-        puts("unpacking huff data...");
         bit_buffer_t compressed;
         memset(&compressed, 0, sizeof(bit_buffer_t));
         compressed.buffer = buf;
-        buf = huff_unpack(&compressed);
+        byte_buffer_t new_buf = huff_unpack(&compressed);
+        BARPH_FREE(buf.data - 8);
+        buf = new_buf;
     }
     if (do_rle)
     {
-        puts("unpacking rle data...");
-        buf = super_big_rle_decompress(buf.data, buf.len);
+        byte_buffer_t new_buf = super_big_rle_decompress(buf.data, buf.len);
+        BARPH_FREE(buf.data);
+        buf = new_buf;
     }
     if (do_diff)
     {
-        puts("unpacking diff data...");
         for (size_t i = do_diff; i < buf.len; i += 1)
             buf.data[i] += buf.data[i - do_diff];
     }

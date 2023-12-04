@@ -63,7 +63,6 @@ int main(int argc, char ** argv)
     {
         buf.data = barph_decompress(buf.data, buf.len, &buf.len);
         
-        puts("saving...");
         FILE * f2 = fopen(argv[3], "wb");
         fwrite(buf.data, buf.len, 1, f2);
         fclose(f2);
