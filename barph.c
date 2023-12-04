@@ -51,21 +51,25 @@ int main(int argc, char ** argv)
         
         FILE * f2 = fopen(argv[3], "wb");
         
-        fwrite("bRPH", 5, 1, f2);
-        fwrite(&do_diff, 1, 1, f2);
-        fwrite(&do_rle, 1, 1, f2);
-        fwrite(&do_huff, 1, 1, f2);
-        
         fwrite(buf.data, buf.len, 1, f2);
+        
         fclose(f2);
     }
     else if (argv[1][0] == 'x')
     {
         buf.data = barph_decompress(buf.data, buf.len, &buf.len);
         
-        FILE * f2 = fopen(argv[3], "wb");
-        fwrite(buf.data, buf.len, 1, f2);
-        fclose(f2);
+        if (buf.data)
+        {
+            FILE * f2 = fopen(argv[3], "wb");
+            fwrite(buf.data, buf.len, 1, f2);
+            fclose(f2);
+        }
+        else
+        {
+            fprintf(stderr, "error: checksum validation failed");
+            exit(-1);
+        }
     }
     
     free(buf.data);

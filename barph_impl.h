@@ -533,10 +533,17 @@ static byte_buffer_t huff_unpack(bit_buffer_t * buf)
     return ret;
 }
 
+// passed-in data is modified, but not stored; it still belongs to the caller, and must be freed by the caller
 // returned data must be freed by the caller; it was allocated with BARPH_MALLOC
 static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_rle, uint8_t do_huff, uint8_t do_diff, size_t * out_len)
 {
     byte_buffer_t buf = {data, len, len};
+    
+    const uint32_t big_prime = 0x1011B0D5;
+    uint32_t checksum = 0x87654321;
+    
+    for (size_t i = 0; i < len; i += 1)
+        checksum = (checksum ^ buf.data[i] ^ i) * big_prime;
     
     if (do_diff)
     {
@@ -546,19 +553,35 @@ static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_rle, uint
     if (do_rle)
     {
         byte_buffer_t new_buf = super_big_rle_compress(buf.data, buf.len);
-        BARPH_FREE(buf.data);
+        if (buf.data != data)
+            BARPH_FREE(buf.data);
         buf = new_buf;
     }
     if (do_huff)
     {
         byte_buffer_t new_buf = huff_pack(buf.data, buf.len).buffer;
-        BARPH_FREE(buf.data);
+        if (buf.data != data)
+            BARPH_FREE(buf.data);
         buf = new_buf;
     }
     
-    *out_len = buf.len;
-    return buf.data;
+    byte_buffer_t real_buf = {0, 0, 0};
+    bytes_reserve(&real_buf, buf.len + 8 + 4);
+    
+    bytes_push(&real_buf, (const uint8_t *)"bRPH", 5);
+    byte_push(&real_buf, do_diff);
+    byte_push(&real_buf, do_rle);
+    byte_push(&real_buf, do_huff);
+    bytes_push(&real_buf, (uint8_t *)&checksum, 4);
+    bytes_push(&real_buf, buf.data, buf.len);
+    
+    if (buf.data != data)
+        BARPH_FREE(buf.data);
+    
+    *out_len = real_buf.len;
+    return real_buf.data;
 }
+// passed-in data is modified, but not stored; it still belongs to the caller, and must be freed by the caller
 // returned data must be freed by the caller; it was allocated with BARPH_MALLOC
 static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
 {
@@ -573,22 +596,26 @@ static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
     uint8_t do_rle = buf.data[6];
     uint8_t do_huff = buf.data[7];
     
-    buf.data += 8;
-    buf.len -= 8;
+    uint32_t stored_checksum = buf.data[8]
+        | (((uint32_t)buf.data[9]) << 8)
+        | (((uint32_t)buf.data[10]) << 16)
+        | (((uint32_t)buf.data[11]) << 24);
+    
+    buf.data += 12;
+    buf.len -= 12;
     
     if (do_huff)
     {
         bit_buffer_t compressed;
         memset(&compressed, 0, sizeof(bit_buffer_t));
         compressed.buffer = buf;
-        byte_buffer_t new_buf = huff_unpack(&compressed);
-        BARPH_FREE(buf.data - 8);
-        buf = new_buf;
+        buf = huff_unpack(&compressed);
     }
     if (do_rle)
     {
         byte_buffer_t new_buf = super_big_rle_decompress(buf.data, buf.len);
-        BARPH_FREE(buf.data);
+        if (buf.data != data)
+            BARPH_FREE(buf.data);
         buf = new_buf;
     }
     if (do_diff)
@@ -597,6 +624,26 @@ static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
             buf.data[i] += buf.data[i - do_diff];
     }
     
-    *out_len = buf.len;
-    return buf.data;
+    const uint32_t big_prime = 0x1011B0D5;
+    uint32_t checksum = 0x87654321;
+    
+    if (stored_checksum != 0)
+    {
+        for (size_t i = 0; i < buf.len; i += 1)
+            checksum = (checksum ^ buf.data[i] ^ i) * big_prime;
+    }
+    else
+        checksum = stored_checksum;
+    
+    if (checksum == stored_checksum)
+    {
+        *out_len = buf.len;
+        return buf.data;
+    }
+    else
+    {
+        if (buf.data != data)
+            BARPH_FREE(buf.data);
+        return 0;
+    }
 }
