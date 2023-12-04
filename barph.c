@@ -118,17 +118,22 @@ int is_pow_2(unsigned int x)
     return !(x & (x - 1));
 }
 
-int has_simple_rle(const uint8_t * input, size_t input_len)
+int has_efficient_rle(const uint8_t * input, size_t input_len)
 {
-    for (size_t size = 1; size <= 4; size += 1)
+    if (input_len >= 3)
+    {
+        if (input[0] == input[1] && input[1] == input[2])
+            return 1;
+    }
+    for (size_t size = 2; size <= 4; size += 1)
     {
         if (size * 2 > input_len)
             break;
         
         int failed_match = 0;
-        for (size_t i = size; i < input_len; i += 1)
+        for (size_t i = 0; i < size; i += 1)
         {
-            if (input[i - size] != input[i])
+            if (input[i + size] != input[i])
             {
                 failed_match = 1;
                 break;
@@ -144,44 +149,34 @@ byte_buffer_t super_big_rle_compress(const uint8_t * input, size_t input_len)
 {
     byte_buffer_t ret = {0, 0, 0};
     
-    byte_push(&ret, (input_len >> 56) & 0xFF);
-    byte_push(&ret, (input_len >> 48) & 0xFF);
-    byte_push(&ret, (input_len >> 40) & 0xFF);
-    byte_push(&ret, (input_len >> 32) & 0xFF);
-    byte_push(&ret, (input_len >> 24) & 0xFF);
-    byte_push(&ret, (input_len >> 16) & 0xFF);
-    byte_push(&ret, (input_len >> 8) & 0xFF);
     byte_push(&ret, input_len & 0xFF);
-    
-    size_t skip_most_above = 16;
-    size_t skip_most_under = 256;
-    size_t pattern_check_length = 16;
+    byte_push(&ret, (input_len >> 8) & 0xFF);
+    byte_push(&ret, (input_len >> 16) & 0xFF);
+    byte_push(&ret, (input_len >> 24) & 0xFF);
+    byte_push(&ret, (input_len >> 32) & 0xFF);
+    byte_push(&ret, (input_len >> 40) & 0xFF);
+    byte_push(&ret, (input_len >> 48) & 0xFF);
+    byte_push(&ret, (input_len >> 56) & 0xFF);
     
     size_t i = 0;
     
     while (i < input_len)
     {
-//        uint8_t c = input[i];
         size_t j = i;
         size_t rle_size = 0;
         
-        for (size_t _size = 1; _size <= 256; ++_size)
+        // try out various word sizes from 1 to 16
+        for (size_t _size = 1; _size < 16; ++_size)
         {
             size_t size = _size;
+            
             if (i + size > input_len)
                 break;
-            if (size > skip_most_above && size < skip_most_under && !is_pow_2(size))
-                continue;
             
-            int last_test = 0;
-            if (size >= 4)
-            {
-                size_t test_buf_len = (i + size + pattern_check_length) < (i + 257) ? (i + size + pattern_check_length) : (i + 257);
-                test_buf_len = test_buf_len < input_len ? test_buf_len : input_len;
-                last_test = has_simple_rle(&input[i + size], test_buf_len - (i + size));
-            }
+            // loop forward until we hit a differing byte pair
+            size_t count = _size == 1 ? 127 : 63;
             size_t j2 = i + size;
-            while (j2 + size <= ((i + 127 * size) < input_len ? (i + 127 * size) : input_len))
+            while (j2 + size <= ((i + count * size) < input_len ? (i + count * size) : input_len))
             {
                 for (size_t off = 0; off < size; off += 1)
                 {
@@ -194,22 +189,42 @@ byte_buffer_t super_big_rle_compress(const uint8_t * input, size_t input_len)
             }
 outer:
             {
+                // check if this run is more efficient than the best run
                 size_t old_src = j - i;
                 size_t new_src = j2 - i;
+                size_t new_dest = (size + (size < 2 ? size : 2));
+                size_t old_dest = ((rle_size > 1 ? rle_size : 1) + (rle_size < 2 ? rle_size : 2));
                 // multiplying by opposite term is, without the int division truncation, equivalent to dividing by the correct term and then multiplying both by both terms
-                size_t old_eff = old_src * (size + (size < 2 ? size : 2));
-                size_t new_eff = new_src * ((rle_size > 1 ? rle_size : 1) + (rle_size < 2 ? rle_size : 2));
+                size_t old_eff = old_src * new_dest;
+                size_t new_eff = new_src * old_dest;
                 if (new_eff > old_eff)
                 {
                     rle_size = size;
                     j = j2;
                 }
-                if (last_test)
-                    break;
             }
         }
-        
         uint8_t n = (j - i) / rle_size - 1;
+        // if we didn't find any RLE, store a literal
+        if (n == 0)
+        {
+            uint16_t size;
+            for (size = 17; size < (1 << 14); size += 1)
+            {
+                if (i + size > input_len)
+                    break;
+                if (has_efficient_rle(&input[i + size], input_len - (i + size)))
+                    break;
+            }
+            size -= 1;
+            
+            byte_push(&ret, 0xC0 | (size & 0x3F));
+            byte_push(&ret, size >> 6);
+            for (size_t j = 0; j < size; ++j)
+                byte_push(&ret, input[i++]);
+            continue;
+        }
+        // if we found RLE, store the RLE
         if (rle_size > 1)
         {
             byte_push(&ret, n | 0x80);
@@ -230,14 +245,14 @@ byte_buffer_t super_big_rle_decompress(const uint8_t * input, size_t input_len)
     size_t i = 0;
     
     uint64_t size = 0;
-    size = (size << 8) | input[i++];
-    size = (size << 8) | input[i++];
-    size = (size << 8) | input[i++];
-    size = (size << 8) | input[i++];
-    size = (size << 8) | input[i++];
-    size = (size << 8) | input[i++];
-    size = (size << 8) | input[i++];
-    size = (size << 8) | input[i++];
+    size |= input[i++];
+    size |= ((uint64_t)input[i++]) << 8;
+    size |= ((uint64_t)input[i++]) << 16;
+    size |= ((uint64_t)input[i++]) << 24;
+    size |= ((uint64_t)input[i++]) << 32;
+    size |= ((uint64_t)input[i++]) << 40;
+    size |= ((uint64_t)input[i++]) << 48;
+    size |= ((uint64_t)input[i++]) << 56;
     
     byte_buffer_t ret = {0, 0, 0};
     
@@ -246,21 +261,39 @@ byte_buffer_t super_big_rle_decompress(const uint8_t * input, size_t input_len)
     while (i < input_len)
     {
         uint8_t dat = input[i++];
-        size_t n = (dat & 0x7F) + 1;
-        
-        if (!(dat & 0x80))
+        // literal
+        // in RLE mode, bits 7 and 6 cannot be set at the same time, so this works as a signal
+        if ((dat & 0xC0) == 0xC0)
         {
-            uint8_t c = input[i++];
-            byte_push_many(&ret, c, n);
+            uint16_t size = 0;
+            size |= dat & 0x3F;
+            size |= ((uint16_t)input[i++]) << 6;
+            
+            bytes_push(&ret, &input[i], size);
+            i += size;
         }
+        // RLE
         else
         {
-            size_t rle_size = input[i++] + 2;
-            bytes_push(&ret, &input[i], rle_size);
-            i += rle_size;
+            // number of extra repetitions is stored in the lower 7 bits of dat
+            size_t n = (dat & 0x7F) + 1;
             
-            for (size_t j = 0; j < (n - 1); j += 1)
-                bytes_push(&ret, &ret.data[ret.len - rle_size], rle_size);
+            // single-byte word mode (n can be up to 127)
+            if (!(dat & 0x80))
+            {
+                uint8_t c = input[i++];
+                byte_push_many(&ret, c, n);
+            }
+            // long word mode (note: n will be at most 16)
+            else
+            {
+                size_t rle_size = input[i++] + 2;
+                bytes_push(&ret, &input[i], rle_size);
+                i += rle_size;
+                
+                for (size_t j = 0; j < (n - 1); j += 1)
+                    bytes_push(&ret, &ret.data[ret.len - rle_size], rle_size);
+            }
         }
     }
     
@@ -337,16 +370,19 @@ huff_node_t * pop_huff_node(bit_buffer_t * buf)
 
 bit_buffer_t huff_pack(uint8_t * data, size_t len)
 {
-    // generate dictionary
+    // build huff dictionary
     
-    size_t counts[256];
-    memset(counts, 0, sizeof(size_t) * 256);
+    // count bytes, then sort them
+    // we stuff the byte identity into the bottom 8 bits
+    uint64_t counts[256];
+    memset(counts, 0, sizeof(uint64_t) * 256);
     for (size_t i = 0; i < len; i += 1)
         counts[data[i]] += 256;
     for (size_t b = 0; b < 256; b++)
         counts[b] |= b;
-    qsort(&counts, 256, sizeof(size_t), count_compare);
+    qsort(&counts, 256, sizeof(uint64_t), count_compare);
     
+    // set up raw huff nodes
     huff_node_t * unordered_dict[256];
     for (size_t i = 0; i < 256; i += 1)
     {
@@ -358,10 +394,12 @@ bit_buffer_t huff_pack(uint8_t * data, size_t len)
         unordered_dict[i]->children[1] = 0;
     }
     
+    // set up byte name -> huff node dict
     huff_node_t * dict[256];
     for (size_t i = 0; i < 256; i += 1)
         dict[unordered_dict[i]->symbol] = unordered_dict[i];
     
+    // set up tree generation queues
     huff_node_t * queue_in[256];
     size_t queue_in_count = 256;
     
@@ -373,9 +411,11 @@ bit_buffer_t huff_pack(uint8_t * data, size_t len)
     for (size_t i = 0; i < 256; i += 1)
         queue_out[i] = 0;
     
+    // remove zero-frequency items from the input queue
     while (queue_in[queue_in_count - 1]->freq == 0 && queue_in_count > 0)
         queue_in_count -= 1;
     
+    // start pumping through the queues
     while (queue_in_count + queue_out_count > 1)
     {
         if (queue_out_count > 250)
@@ -423,6 +463,8 @@ bit_buffer_t huff_pack(uint8_t * data, size_t len)
         queue_out[0] = new_node;
     }
     
+    // set up buffers and start pushing data to them
+    
     bit_buffer_t ret;
     memset(&ret, 0, sizeof(bit_buffer_t));
     
@@ -466,11 +508,75 @@ byte_buffer_t huff_unpack(bit_buffer_t * buf)
     return ret;
 }
 
+uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_rle, uint8_t do_huff, uint8_t do_diff, size_t * out_len)
+{
+    byte_buffer_t buf = {data, len, len};
+    
+    if (do_diff)
+    {
+        for (size_t i = buf.len - 1; i >= do_diff; i -= 1)
+            buf.data[i] -= buf.data[i - do_diff];
+    }
+    if (do_rle)
+        buf = super_big_rle_compress(buf.data, buf.len);
+    if (do_huff)
+        buf = huff_pack(buf.data, buf.len).buffer;
+    
+    *out_len = buf.len;
+    return buf.data;
+}
+uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
+{
+    byte_buffer_t buf = {data, len, len};
+    
+    if (buf.len < 8 || memcmp(buf.data, "bRPH", 5) != 0)
+    {
+        puts("invalid barph file");
+        exit(0);
+    }
+    uint8_t do_diff = buf.data[5];
+    uint8_t do_rle = buf.data[6];
+    uint8_t do_huff = buf.data[7];
+    
+    buf.data += 8;
+    buf.len -= 8;
+    
+    if (do_huff)
+    {
+        puts("unpacking huff data...");
+        bit_buffer_t compressed;
+        memset(&compressed, 0, sizeof(bit_buffer_t));
+        compressed.buffer = buf;
+        buf = huff_unpack(&compressed);
+    }
+    if (do_rle)
+    {
+        puts("unpacking rle data...");
+        buf = super_big_rle_decompress(buf.data, buf.len);
+    }
+    if (do_diff)
+    {
+        puts("unpacking diff data...");
+        for (size_t i = do_diff; i < buf.len; i += 1)
+            buf.data[i] += buf.data[i - do_diff];
+    }
+    
+    *out_len = buf.len;
+    return buf.data;
+}
+
 int main(int argc, char ** argv)
 {
     if (argc < 3 || (argv[1][0] != 'z' && argv[1][0] != 'x'))
     {
-        puts("usage: barph (z|x) <in> <out>");
+        puts("usage: barph (z|x) <in> <out> [0|1] [0|1] [number]");
+        puts("z: compress <in> into <out>");
+        puts("x: decompress <in> into <out>");
+        puts("The three numeric arguments at the end are for z (compress) mode.");
+        puts("The first turns on RLE. RLE alone can give up to a 1:127 compression ratio, at most.");
+        puts("The second turns on Huffman coding. Huffman coding alone can give up to a 1:8 compression ratio, at most.");
+        puts("The third turns on delta coding, with a byte distance. 3 works good for 3-channel RGB images, 4 works good for 3-channel RGBA images or 16-bit PCM audio. Only if they're not already compressed, though. Does not generally work well with most files, like text.");
+        puts("If given, the numeric arguments must be given in order. If not given, their defaults are 1, 1, 0.");
         return 0;
     }
     FILE * f = fopen(argv[2], "rb");
@@ -491,19 +597,18 @@ int main(int argc, char ** argv)
     
     if (argv[1][0] == 'z')
     {
-        uint8_t do_diff = 4;
-        uint8_t do_rle = 0;
+        uint8_t do_diff = 0;
+        uint8_t do_rle = 1;
         uint8_t do_huff = 1;
         
-        if (do_diff)
-        {
-            for (size_t i = buf.len - 1; i >= do_diff; i -= 1)
-                buf.data[i] -= buf.data[i - do_diff];
-        }
-        if (do_rle)
-            buf = super_big_rle_compress(buf.data, buf.len);
-        if (do_huff)
-            buf = huff_pack(buf.data, buf.len).buffer;
+        if (argc > 4)
+            do_rle = strtol(argv[4], 0, 10);
+        if (argc > 5)
+            do_huff = strtol(argv[5], 0, 10);
+        if (argc > 6)
+            do_diff = strtol(argv[6], 0, 10);
+        
+        buf.data = barph_compress(buf.data, buf.len, do_rle, do_huff, do_diff, &buf.len);
         
         FILE * f2 = fopen(argv[3], "wb");
         
@@ -517,37 +622,7 @@ int main(int argc, char ** argv)
     }
     else if (argv[1][0] == 'x')
     {
-        if (buf.len < 8 || memcmp(buf.data, "bRPH", 5) != 0)
-        {
-            puts("invalid barph file");
-            exit(0);
-        }
-        uint8_t do_diff = buf.data[5];
-        uint8_t do_rle = buf.data[6];
-        uint8_t do_huff = buf.data[7];
-        
-        buf.data += 8;
-        buf.len -= 8;
-        
-        if (do_huff)
-        {
-            puts("unpacking huff data...");
-            bit_buffer_t compressed;
-            memset(&compressed, 0, sizeof(bit_buffer_t));
-            compressed.buffer = buf;
-            buf = huff_unpack(&compressed);
-        }
-        if (do_rle)
-        {
-            puts("unpacking rle data...");
-            buf = super_big_rle_decompress(buf.data, buf.len);
-        }
-        if (do_diff)
-        {
-            puts("unpacking diff data...");
-            for (size_t i = do_diff; i < buf.len; i += 1)
-                buf.data[i] += buf.data[i - do_diff];
-        }
+        buf.data = barph_decompress(buf.data, buf.len, &buf.len);
         
         puts("saving...");
         FILE * f2 = fopen(argv[3], "wb");
