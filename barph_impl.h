@@ -1,3 +1,6 @@
+#ifndef BARPH_IMPL_HEADER
+#define BARPH_IMPL_HEADER
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -651,3 +654,5 @@ static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
         return 0;
     }
 }
+
+#endif // BARPH_IMPL_HEADER
