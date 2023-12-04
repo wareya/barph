@@ -15,7 +15,7 @@ void bytes_reserve(byte_buffer_t * buf, size_t extra)
         buf->cap = 8;
     while (buf->len + extra > buf->cap)
         buf->cap <<= 1;
-    buf->data = realloc(buf->data, buf->cap);
+    buf->data = (uint8_t *)realloc(buf->data, buf->cap);
 }
 void bytes_push(byte_buffer_t * buf, const uint8_t * bytes, size_t count)
 {
@@ -36,7 +36,7 @@ void byte_push(byte_buffer_t * buf, uint8_t byte)
         buf->cap = buf->cap << 1;
         if (buf->cap < 8)
             buf->cap = 8;
-        buf->data = realloc(buf->data, buf->cap);
+        buf->data = (uint8_t *)realloc(buf->data, buf->cap);
     }
     buf->data[buf->len] = byte;
     buf->len += 1;
@@ -276,7 +276,7 @@ typedef struct _huff_node {
 
 huff_node_t * alloc_huff_node()
 {
-    return malloc(sizeof(huff_node_t));
+    return (huff_node_t *)malloc(sizeof(huff_node_t));
 }
 
 void push_code(huff_node_t * node, uint8_t bit)
@@ -314,7 +314,7 @@ huff_node_t * pop_huff_node(bit_buffer_t * buf)
     huff_node_t * ret;
     ret = alloc_huff_node();
     ret->symbol = 0;
-    ret->code = (bit_buffer_t){{0, 0, 0}, 0, 0, 0};
+    memset(&ret->code, 0, sizeof(bit_buffer_t));
     ret->freq = 0;
     ret->children[0] = 0;
     ret->children[1] = 0;
@@ -335,31 +335,6 @@ huff_node_t * pop_huff_node(bit_buffer_t * buf)
     return ret;
 }
 
-void huff_to_table(huff_node_t * huff, uint16_t ** table, size_t * len)
-{
-    size_t start = *len;
-    *len += 3;
-    *table = realloc(*table, sizeof(uint16_t) * *len);
-    
-    if (huff->children[0] || huff->children[1])
-    {
-        huff_to_table(huff->children[0], table, len);
-        size_t left_len = *len - start;
-        
-        huff_to_table(huff->children[1], table, len);
-        
-        (*table)[start    ] = 3;
-        (*table)[start + 1] = left_len;
-        (*table)[start + 2] = 0;
-    }
-    else
-    {
-        (*table)[start    ] = 0;
-        (*table)[start + 1] = 0;
-        (*table)[start + 2] = huff->symbol;
-    }
-}
-
 bit_buffer_t huff_pack(uint8_t * data, size_t len)
 {
     // generate dictionary
@@ -377,7 +352,7 @@ bit_buffer_t huff_pack(uint8_t * data, size_t len)
     {
         unordered_dict[i] = alloc_huff_node();
         unordered_dict[i]->symbol = counts[i] & 0xFF;
-        unordered_dict[i]->code = (bit_buffer_t){{0, 0, 0}, 0, 0, 0};
+        memset(&unordered_dict[i]->code, 0, sizeof(bit_buffer_t));
         unordered_dict[i]->freq = counts[i] >> 8;
         unordered_dict[i]->children[0] = 0;
         unordered_dict[i]->children[1] = 0;
@@ -433,7 +408,7 @@ bit_buffer_t huff_pack(uint8_t * data, size_t len)
         // make new node
         huff_node_t * new_node = alloc_huff_node();
         new_node->symbol = 0;
-        new_node->code = (bit_buffer_t){{0, 0, 0}, 0, 0, 0};
+        memset(&new_node->code, 0, sizeof(bit_buffer_t));
         new_node->freq = lowest->freq + next_lowest->freq;
         new_node->children[0] = lowest;
         new_node->children[1] = next_lowest;
@@ -448,7 +423,8 @@ bit_buffer_t huff_pack(uint8_t * data, size_t len)
         queue_out[0] = new_node;
     }
     
-    bit_buffer_t ret = (bit_buffer_t){{0, 0, 0}, 0, 0, 0};
+    bit_buffer_t ret;
+    memset(&ret, 0, sizeof(bit_buffer_t));
     
     bits_push(&ret, len, 8*8);
     
@@ -479,12 +455,6 @@ byte_buffer_t huff_unpack(bit_buffer_t * buf)
     
     huff_node_t * root = pop_huff_node(buf);
     
-    uint16_t * table = 0;
-    size_t table_len = 0;
-    huff_to_table(root, &table, &table_len);
-    
-    printf("unpacking at... %d %lld\n", buf->bit_index, buf->byte_index);
-    
     for(size_t i = 0; i < len; i++)
     {
         huff_node_t * node = root;
@@ -492,13 +462,6 @@ byte_buffer_t huff_unpack(bit_buffer_t * buf)
         while (node->children[0])
             node = node->children[bit_pop(buf)];
         byte_push(&ret, node->symbol);
-        /*
-        uint16_t * node = table;
-        node += node[bit_pop(buf)];
-        while (node[0])
-            node += node[bit_pop(buf)];
-        byte_push(&ret, node[2]);
-        */
     }
     return ret;
 }
@@ -520,38 +483,74 @@ int main(int argc, char ** argv)
     size_t file_len = ftell(f);
     fseek(f, 0, SEEK_SET);
     
-    uint8_t * raw_data = malloc(file_len);
+    uint8_t * raw_data = (uint8_t *)malloc(file_len);
     fread(raw_data, file_len, 1, f);
     byte_buffer_t buf = {raw_data, file_len, file_len};
     
     fclose(f);
     
-    int do_rle = 0;
-    int do_huff = 1;
-    
     if (argv[1][0] == 'z')
     {
+        uint8_t do_diff = 4;
+        uint8_t do_rle = 0;
+        uint8_t do_huff = 1;
+        
+        if (do_diff)
+        {
+            for (size_t i = buf.len - 1; i >= do_diff; i -= 1)
+                buf.data[i] -= buf.data[i - do_diff];
+        }
         if (do_rle)
             buf = super_big_rle_compress(buf.data, buf.len);
         if (do_huff)
             buf = huff_pack(buf.data, buf.len).buffer;
         
         FILE * f2 = fopen(argv[3], "wb");
+        
+        fwrite("bRPH", 5, 1, f2);
+        fwrite(&do_diff, 1, 1, f2);
+        fwrite(&do_rle, 1, 1, f2);
+        fwrite(&do_huff, 1, 1, f2);
+        
         fwrite(buf.data, buf.len, 1, f2);
         fclose(f2);
     }
     else if (argv[1][0] == 'x')
     {
+        if (buf.len < 8 || memcmp(buf.data, "bRPH", 5) != 0)
+        {
+            puts("invalid barph file");
+            exit(0);
+        }
+        uint8_t do_diff = buf.data[5];
+        uint8_t do_rle = buf.data[6];
+        uint8_t do_huff = buf.data[7];
+        
+        buf.data += 8;
+        buf.len -= 8;
+        
         if (do_huff)
         {
-            bit_buffer_t compressed = (bit_buffer_t){buf, 0, 0, 0};
+            puts("unpacking huff data...");
+            bit_buffer_t compressed;
+            memset(&compressed, 0, sizeof(bit_buffer_t));
+            compressed.buffer = buf;
             buf = huff_unpack(&compressed);
         }
         if (do_rle)
+        {
+            puts("unpacking rle data...");
             buf = super_big_rle_decompress(buf.data, buf.len);
+        }
+        if (do_diff)
+        {
+            puts("unpacking diff data...");
+            for (size_t i = do_diff; i < buf.len; i += 1)
+                buf.data[i] += buf.data[i - do_diff];
+        }
         
-        FILE * f2 = fopen(argv[3], "wb");
         puts("saving...");
+        FILE * f2 = fopen(argv[3], "wb");
         fwrite(buf.data, buf.len, 1, f2);
         fclose(f2);
     }
