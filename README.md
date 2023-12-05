@@ -6,17 +6,17 @@ Public domain, extremely small (around 500 lines of actual C code) run-length-en
 
 In terms of compression ratio, Barph outperforms lz4 on most inputs, but almost never outperforms DEFLATE. It decodes slower than both.
 
-Barph's purpose is to be embedded into applications that need compression where it's more important for the code to be comprehensible than ba fast or have a high compression ratio. The decoder implemented here is fairly slow, but the code is VERY simple and easy to audit. The encoder and decoder implemented here are not streaming, but streaming decoders are possible and shouldn't be too hard to write. Streaming encoders are also possible, but only with lookahead, and only if either huffman coding is disabled or a precomputed huffman tree is used.
+Barph's purpose is to be embedded into applications that need compression where it's more important for the code to be comprehensible than ba fast or have a high compression ratio. The encoder and decoder implemented here are not streaming, but streaming decoders are possible and shouldn't be too hard to write. Streaming encoders are also possible, but only with lookahead, and only if either huffman coding is disabled or a precomputed huffman tree is used.
 
 This project compiles cleanly both as C and C++ code.
 
 Not fuzzed.
 
-No I don't know why the decompression is so slow.
+No, I don't know why the decompression is so slow.
 
 ## Comparison
 
-Made with the `zip`, `unzip`, and `lz4` commands from msys2's repositories, and barph.c compiled as -O3 (without -march=native). Dashes refer to compression level. barph doesn't have a 'standard' compression level setting, only technique flags, so the technique flags that differ from the defaults are noted instead. The best barph flags are used for the given file. If the default flags are the best, alternative flags are not attempted.
+Made with the `zip`, `unzip`, and `lz4` commands from msys2's repositories, and barph.c compiled as -O3 (without -march=native). Dashes refer to compression level. barph doesn't have a 'standard' compression level setting, only technique flags, so the technique flags that differ from the defaults are noted instead (r means rle, h means huffman, d means delta). The best barph flags are used for the given file. If the default flags are the best, alternative flags are not attempted.
 
 file | compressed size | encode time (best of 3) | decode time (best of 3)
 -|-|-|-
@@ -42,4 +42,10 @@ moby dick.txt.-9.lz4 | 583 KB | 0.195s | 0.120s
 moby dick.txt.-9.zip | **500 KB** | 0.151s | **0.041s**
 moby dick.txt.barph | 735 KB | **0.114s** | 0.117s
 moby dick.txt.r0.barph | 722 KB | 0.115s | 0.116s
-todo more
+-|-|-|-
+Godot_v4.1.3-stable_win64.exe | 117560 KB | - | -
+Godot_v4.1.3-stable_win64.exe.-9.lz4 | 60210 KB | **4.161s** | **0.303s**
+Godot_v4.1.3-stable_win64.exe.-9.zip | **53651 KB** | 11.367s | 1.163s
+Godot_v4.1.3-stable_win64.exe.barph | 103466 KB | 4.204s | 3.390s
+Godot_v4.1.3-stable_win64.exe.r0.barph | 100952 KB | 3.430s | 3.162s
+
