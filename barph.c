@@ -15,7 +15,7 @@ int main(int argc, char ** argv)
         puts("The first turns on RLE. RLE alone can give up to a 1:127 compression ratio, at most.");
         puts("The second turns on Huffman coding. Huffman coding alone can give up to a 1:8 compression ratio, at most.");
         puts("The third turns on delta coding, with a byte distance. 3 works good for 3-channel RGB images, 4 works good for 3-channel RGBA images or 16-bit PCM audio. Only if they're not already compressed, though. Does not generally work well with most files, like text.");
-        puts("If given, the numeric arguments must be given in order. If not given, their defaults are 1, 1, 0.");
+        puts("If given, the numeric arguments must be given in order. If not given, their defaults are 1, 1, 0. In other words, RLE and Huffman are enabled by default, but delta coding is not.");
         return 0;
     }
     FILE * f = fopen(argv[2], "rb");

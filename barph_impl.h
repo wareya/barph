@@ -229,6 +229,8 @@ outer:
                     break;
             }
             size -= 1;
+            if (size > input_len - i)
+                size = input_len - i;
             
             byte_push(&ret, 0xC0 | (size & 0x3F));
             byte_push(&ret, size >> 6);
@@ -616,12 +618,15 @@ static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
         bit_buffer_t compressed;
         memset(&compressed, 0, sizeof(bit_buffer_t));
         compressed.buffer = buf;
-        buf = huff_unpack(&compressed);
+        byte_buffer_t new_buf = huff_unpack(&compressed);
+        if (buf.data != data + 12)
+            BARPH_FREE(buf.data);
+        buf = new_buf;
     }
     if (do_rle)
     {
         byte_buffer_t new_buf = super_big_rle_decompress(buf.data, buf.len);
-        if (buf.data != data)
+        if (buf.data != data + 12)
             BARPH_FREE(buf.data);
         buf = new_buf;
     }
