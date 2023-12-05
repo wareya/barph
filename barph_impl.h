@@ -39,12 +39,6 @@ static void bytes_push(byte_buffer_t * buf, const uint8_t * bytes, size_t count)
     memcpy(&buf->data[buf->len], bytes, count);
     buf->len += count;
 }
-static void byte_push_many(byte_buffer_t * buf, uint8_t byte, size_t count)
-{
-    bytes_reserve(buf, count);
-    memset(&buf->data[buf->len], byte, count);
-    buf->len += count;
-}
 static void byte_push(byte_buffer_t * buf, uint8_t byte)
 {
     if (buf->len == buf->cap)
@@ -130,35 +124,90 @@ static uint8_t bit_pop(bit_buffer_t * buf)
     return ret;
 }
 
-static int has_efficient_rle(const uint8_t * input, size_t input_len)
+const size_t min_lookback_length = 4;
+#define BARPH_HASHTABLE_KEY_SHL 4
+#define BARPH_LOOKBACK_BIAS 2
+uint64_t hashtable[(1<<16)<<BARPH_HASHTABLE_KEY_SHL];
+
+// bytes must point to four characters
+void hashmap_insert(const uint8_t * bytes, uint64_t value)
 {
-    if (input_len >= 3)
+    uint16_t a = (bytes[0] | (((uint16_t)bytes[1]) << 8)) * 0x4C35;
+    uint16_t b = ((bytes[2] | (((uint16_t)bytes[3]) << 8)) ^ 0x5813) * 0xACE1;
+    uint32_t key = ((uint32_t)(a ^ b)) << BARPH_HASHTABLE_KEY_SHL;
+    
+    for(int i = (1 << BARPH_HASHTABLE_KEY_SHL) - 1; i > 0; i -= 1)
+        hashtable[key + i] = hashtable[key + i - 1];
+    
+    hashtable[key] = value;
+}
+// bytes must point to four characters
+uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer, const size_t buffer_len)
+{
+    uint16_t a = (bytes[0] | (((uint16_t)bytes[1]) << 8)) * 0x4C35;
+    uint16_t b = ((bytes[2] | (((uint16_t)bytes[3]) << 8)) ^ 0x5813) * 0xACE1;
+    uint32_t key = ((uint32_t)(a ^ b)) << BARPH_HASHTABLE_KEY_SHL;
+    uint64_t best = -1;
+    uint64_t best_len = 3;
+    for (int j = 0; j < (1 << BARPH_HASHTABLE_KEY_SHL); j++)
     {
-        if (input[0] == input[1] && input[1] == input[2])
-            return 1;
-    }
-    for (size_t size = 2; size <= 4; size += 1)
-    {
-        if (size * 2 > input_len)
-            break;
-        
-        int failed_match = 0;
-        for (size_t i = 0; i < size; i += 1)
+        uint64_t value = hashtable[key + j];
+        uint64_t len = 0;
+        for (size_t i = 0; i < buffer_len - value; i++)
         {
-            if (input[i + size] != input[i])
-            {
-                failed_match = 1;
+            if (bytes[i] != buffer[value + i])
                 break;
-            }
+            len += 1;
         }
-        if (!failed_match)
-            return 1;
+        if (len > best_len)
+        {
+            best_len = len;
+            best = value;
+        }
     }
-    return 0;
+    return best;
 }
 
-static byte_buffer_t super_big_rle_compress(const uint8_t * input, size_t input_len)
+uint64_t hashmap_get_efficient(const uint64_t i, const uint8_t * input, const size_t input_len, uint64_t * in_size)
 {
+    if (i >= input_len)
+        return -1;
+    size_t remaining = input_len - i;
+    if (remaining <= min_lookback_length)
+        return -1;
+    
+    uint64_t found_loc = hashmap_get(&input[i], input, input_len);
+    size_t dist = i - found_loc;
+    if (found_loc != (uint64_t)-1 && found_loc < i && dist <= 0x3FFFFFFFF)
+    {
+        size_t size;
+        for (size = 4; size < (1 << 8); size += 1)
+        {
+            if (size >= remaining)
+                break;
+            if (input[i + size] != input[found_loc + size])
+                break;
+        }
+        
+        size_t overhead =
+            dist <= 0x3F ? 1 :
+            (dist <= 0x1FFF ? 2 :
+            (dist <= 0xFFFFF ? 3 :
+            (dist <= 0x7FFFFF ? 4 : 5)));
+        overhead += 1;
+        
+        if (overhead + BARPH_LOOKBACK_BIAS < size + 1)
+        {
+            *in_size = size;
+            return found_loc;
+        }
+    }
+    return -1;
+}
+
+static byte_buffer_t lookback_compress(const uint8_t * input, size_t input_len)
+{
+    memset(&hashtable, 0, sizeof(hashtable));
     byte_buffer_t ret = {0, 0, 0};
     
     byte_push(&ret, input_len & 0xFF);
@@ -171,210 +220,100 @@ static byte_buffer_t super_big_rle_compress(const uint8_t * input, size_t input_
     byte_push(&ret, (input_len >> 56) & 0xFF);
     
     size_t i = 0;
-    
-    // must be a power of 2
-    const size_t loc_cache_size = 1024;
-    const size_t loc_cursor_mask = loc_cache_size - 1;
-    
-    size_t test_locs[loc_cache_size];
-    memset(&test_locs, 0, sizeof(size_t) * loc_cache_size);
-    size_t test_loc_cursor = 0;
-    
+    size_t l = 0;
     while (i < input_len)
     {
-        size_t j = i;
-        size_t rle_size = 0;
+        size_t remaining = input_len - i;
         
-        // try out various word sizes from 1 to 16
-        for (size_t _size = 1; _size < 16; ++_size)
+        // check for lookback hit
+        if (remaining > min_lookback_length)
         {
-            size_t size = _size;
-            
-            if (i + size > input_len)
-                break;
-            
-            // loop forward until we hit a differing byte pair
-            size_t count = _size == 1 ? 127 : 63;
-            size_t j2 = i + size;
-            while (j2 + size <= ((i + count * size) < input_len ? (i + count * size) : input_len))
+            size_t size = 0;
+            uint64_t found_loc = hashmap_get_efficient(i, input, input_len, &size);
+            if (found_loc != (uint64_t)-1)
             {
-                for (size_t off = 0; off < size; off += 1)
-                {
-                    uint8_t c = input[j2 + off - size];
-                    uint8_t b = input[j2 + off];
-                    if (c != b)
-                        goto outer;
-                }
-                j2 += size;
-            }
-            outer:
-            {
-                // check if this run is more efficient than the best run
-                size_t old_src = j - i;
-                size_t new_src = j2 - i;
-                size_t new_dest = (size + (size < 2 ? size : 2));
-                size_t old_dest = ((rle_size > 1 ? rle_size : 1) + (rle_size < 2 ? rle_size : 2));
-                // multiplying by opposite term is, without the int division truncation, equivalent to dividing by the correct term and then multiplying both by both terms
-                size_t old_eff = old_src * new_dest;
-                size_t new_eff = new_src * old_dest;
-                if (new_eff > old_eff)
-                {
-                    rle_size = size;
-                    j = j2;
-                }
-            }
-        }
-        uint8_t n = (j - i) / rle_size - 1;
-        // if we didn't find any RLE, store a literal
-        if (n == 0)
-        {
-            // try doing lookback
-            const size_t min_lookback_size = 4;
-            
-            size_t remaining = input_len - i;
-            size_t found_loc = i;
-            size_t found_len = min_lookback_size - 1;
-            size_t found_overhead = 0;
-            
-            if (remaining > min_lookback_size)
-            {
-                // smart...?
-                for (size_t t = 0; t < loc_cache_size; t += 1)
-                {
-                    size_t loc = test_locs[(test_loc_cursor - 1 - t) & loc_cursor_mask];
-                
-                // brute force
-                //for (size_t loc = i - 1; loc < i && i - loc < 40000; loc -= 1)
-                //{
-                    size_t dist = i - loc;
-                    
-                    if (loc == 0 || dist > 0xFFFFFFFF)
-                        continue;
-                    
-                    /*
-                    size_t overhead = 
-                        dist <= 0xF ? 1 :
-                        dist <= 0x7FF ? 2 :
-                        dist <= 0x3FFFF ? 3 :
-                        dist <= 0x1FFFFF ? 4 :
-                        5;
-                    */
-                    
-                    size_t good_len = 0;
-                    for (size_t j = 0; j < (1 << 13); j += 1)
-                    {
-                        if (input[i + j] != input[loc + j])
-                            break;
-                        good_len += 1;
-                    }
-                    if (good_len > found_len)
-                    {
-                        found_loc = loc;
-                        found_len = good_len;
-                    }
-                    if (good_len >= 32) // good enough
-                        break;
-                }
-            }
-            
-            test_locs[test_loc_cursor] = i;
-            test_loc_cursor = (test_loc_cursor + 1) & loc_cursor_mask;
-            
-            uint16_t size;
-            if (found_loc == i)
-            {
-                for (size = 17; size < (1 << 13); size += 1)
-                {
-                    if (i + size > input_len || has_efficient_rle(&input[i + size], input_len - (i + size)))
-                        break;
-                }
-                size -= 1;
-            }
-            else
-                size = found_len;
-            
-            if (size > input_len - i)
-                size = input_len - i;
-            
-            if (found_loc != i)
-            {
-                if (found_loc > i)
-                {
-                    fprintf(stderr, "internal error: bad lookback match (looked forwards)");
-                    exit(-1);
-                }
+                l += 1;
                 
                 size_t dist = i - found_loc;
                 
-                printf("found %08llX at %08llX\n", dist, i);
-                
-                if (dist <= 0xF)
-                    byte_push(&ret, 0xE0 | (dist & 0xF));
-                else if (dist <= 0x7FF)
+                if (dist <= 0x3F)
+                    byte_push(&ret, 0x80 | (dist & 0x3F));
+                else if (dist <= 0x1FFF)
                 {
-                    byte_push(&ret, 0xF0 | (dist & 0x7));
-                    byte_push(&ret, dist >> 3);
+                    byte_push(&ret, 0xC0 | (dist & 0x1F));
+                    byte_push(&ret, dist >> 5);
                 }
-                else if (dist <= 0x3FFFF)
+                else if (dist <= 0xFFFFF)
                 {
-                    byte_push(&ret, 0xF8 | (dist & 0x3));
+                    byte_push(&ret, 0xE0 | (dist & 0x0F));
+                    byte_push(&ret, dist >> 4);
+                    byte_push(&ret, dist >> 12);
+                }
+                else if (dist <= 0x7FFFFF)
+                {
+                    byte_push(&ret, 0xF0 | (dist & 7));
+                    byte_push(&ret, dist >> 3);
+                    byte_push(&ret, dist >> 11);
+                    byte_push(&ret, dist >> 19);
+                }
+                else if (dist <= 0x3FFFFFFFF)
+                {
+                    byte_push(&ret, 0xF8 | (dist & 3));
                     byte_push(&ret, dist >> 2);
                     byte_push(&ret, dist >> 10);
-                }
-                else if (dist <= 0x1FFFFF)
-                {
-                    byte_push(&ret, 0xFC | (dist & 0x1));
-                    byte_push(&ret, dist >> 1);
-                    byte_push(&ret, dist >> 9);
-                    byte_push(&ret, dist >> 17);
-                }
-                else if (dist <= 0xFFFFFFFF)
-                {
-                    byte_push(&ret, 0xFE);
-                    byte_push(&ret, dist);
-                    byte_push(&ret, dist >> 8);
-                    byte_push(&ret, dist >> 16);
-                    byte_push(&ret, dist >> 24);
+                    byte_push(&ret, dist >> 18);
+                    byte_push(&ret, dist >> 26);
                 }
                 else
                 {
                     fprintf(stderr, "internal error: bad lookback match (goes too far)");
                     exit(-1);
                 }
-            }
-            else
-            {
-                printf("simple literal of length %08llX at %08llX\n", size, i);
-            }
-            
-            byte_push(&ret, 0xC0 | (size & 0x1F));
-            byte_push(&ret, size >> 5);
-            if (found_loc == i)
-            {
-                for (size_t j = 0; j < size; ++j)
-                    byte_push(&ret, input[i++]);
-            }
-            else
+                // push literal info
+                byte_push(&ret, size);
+                // the actual bytes are not pushed in lookback mode
                 i += size;
-            continue;
+                continue;
+            }
         }
-        // if we found RLE, store the RLE
-        if (rle_size > 1)
+        
+        // store a literal if we found no lookback
+        uint16_t size = 1;
+        while (size < (1 << 14) && i + size < input_len)
         {
-            byte_push(&ret, n | 0x80);
-            byte_push(&ret, rle_size - 2);
+            size_t _size_unused;
+            uint64_t found_loc = hashmap_get_efficient(i + size, input, input_len, &_size_unused);
+            if (found_loc != (uint64_t)-1)
+                break;
+            size += 1;
+        }
+        if (size == (1 << 14))
+            size -= 1;
+        
+        if (size > input_len - i)
+            size = input_len - i;
+        
+        // we store short and long literals slightly differently, with a bit flag to differentiate
+        if (size > 0x3F)
+        {
+            byte_push(&ret, (size & 0x3F) | 0x40);
+            byte_push(&ret, size >> 6);
         }
         else
-            byte_push(&ret, n);
-        for (size_t off = 0; off < rle_size; ++off)
-            byte_push(&ret, input[i + off]);
-        i = j;
+            byte_push(&ret, size & 0x3F);
+        
+        for (size_t j = 0; j < size; ++j)
+        {
+            hashmap_insert(&input[i], i);
+            byte_push(&ret, input[i++]);
+        }
     }
+    printf("lookbacks found: %lld\n", l);
     
     return ret;
 }
 
-static byte_buffer_t super_big_rle_decompress(const uint8_t * input, size_t input_len)
+static byte_buffer_t lookback_decompress(const uint8_t * input, size_t input_len)
 {
     size_t i = 0;
     
@@ -396,79 +335,56 @@ static byte_buffer_t super_big_rle_decompress(const uint8_t * input, size_t inpu
     {
         uint8_t dat = input[i++];
         
-        // lookback
-        if ((dat & 0xE0) == 0xE0)
+        // lookback mode
+        if ((dat & 0x80) == 0x80)
         {
             size_t loc = 0;
-            if ((dat & 0xF0) == 0xE0)
+            if ((dat & 0xC0) == 0x80)
+                loc = dat & 0x3F;
+            else if ((dat & 0xE0) == 0xC0)
+            {
+                loc = dat & 0x1F;
+                loc |= ((uint32_t)input[i++]) << 5;
+            }
+            else if ((dat & 0xF0) == 0xE0)
+            {
                 loc = dat & 0x0F;
+                loc |= ((uint32_t)input[i++]) << 4;
+                loc |= ((uint32_t)input[i++]) << 12;
+            }
             else if ((dat & 0xF8) == 0xF0)
             {
-                loc = dat & 0x07;
+                loc = dat & 7;
                 loc |= ((uint32_t)input[i++]) << 3;
+                loc |= ((uint32_t)input[i++]) << 11;
+                loc |= ((uint32_t)input[i++]) << 19;
             }
             else if ((dat & 0xFC) == 0xF8)
             {
-                loc = dat & 0x03;
+                loc = dat & 3;
                 loc |= ((uint32_t)input[i++]) << 2;
                 loc |= ((uint32_t)input[i++]) << 10;
-            }
-            else if ((dat & 0xFE) == 0xFC)
-            {
-                loc = dat & 0x01;
-                loc |= ((uint32_t)input[i++]) << 1;
-                loc |= ((uint32_t)input[i++]) << 9;
-                loc |= ((uint32_t)input[i++]) << 17;
-            }
-            else if ((dat & 0xFF) == 0xFE)
-            {
-                loc |= ((uint32_t)input[i++]);
-                loc |= ((uint32_t)input[i++]) << 8;
-                loc |= ((uint32_t)input[i++]) << 16;
-                loc |= ((uint32_t)input[i++]) << 24;
+                loc |= ((uint32_t)input[i++]) << 18;
+                loc |= ((uint32_t)input[i++]) << 26;
             }
             
-            loc = ret.len - loc;
+            uint16_t size = input[i++];
             
-            uint16_t size = 0;
-            size |= ((uint16_t)input[i++]) & 0x1F;
-            size |= ((uint16_t)input[i++]) << 5;
-            
-            bytes_push(&ret, &ret.data[loc], size);
+            // bytes_push uses memcpy, which doesn't work if there's any overlap.
+            // overlap is allowed here, so we have to copy bytes manually.
+            for(size_t j = 0; j < size; j++)
+                byte_push(&ret, ret.data[ret.len - loc]);
         }
-        // literal
-        // in RLE mode, bits 7 and 6 cannot be set at the same time, so this works as a signal
-        else if ((dat & 0xE0) == 0xC0)
+        // literal mode
+        else
         {
-            uint16_t size = 0;
-            size |= dat & 0x1F;
-            size |= ((uint16_t)input[i++]) << 5;
+            uint16_t size = dat & 0x3F;
+            // this bit is true if the literal is long and has an extra length byte
+            if (dat & 0x40)
+                size |= ((uint16_t)input[i++]) << 6;
             
             bytes_push(&ret, &input[i], size);
             i += size;
-        }
-        // RLE
-        else
-        {
-            // number of extra repetitions is stored in the lower 7 bits of dat
-            size_t n = (dat & 0x7F) + 1;
-            
-            // single-byte word mode (n can be up to 127)
-            if (!(dat & 0x80))
-            {
-                uint8_t c = input[i++];
-                byte_push_many(&ret, c, n);
-            }
-            // long word mode (note: n will be at most 63)
-            else
-            {
-                size_t rle_size = input[i++] + 2;
-                bytes_push(&ret, &input[i], rle_size);
-                i += rle_size;
-                
-                for (size_t j = 0; j < (n - 1); j += 1)
-                    bytes_push(&ret, &ret.data[ret.len - rle_size], rle_size);
-            }
         }
     }
     
@@ -701,7 +617,7 @@ static byte_buffer_t huff_unpack(bit_buffer_t * buf)
 
 // passed-in data is modified, but not stored; it still belongs to the caller, and must be freed by the caller
 // returned data must be freed by the caller; it was allocated with BARPH_MALLOC
-static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_rle, uint8_t do_huff, uint8_t do_diff, size_t * out_len)
+static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_lookback, uint8_t do_huff, uint8_t do_diff, size_t * out_len)
 {
     if (!data || !out_len) return 0;
     
@@ -718,9 +634,9 @@ static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_rle, uint
         for (size_t i = buf.len - 1; i >= do_diff; i -= 1)
             buf.data[i] -= buf.data[i - do_diff];
     }
-    if (do_rle)
+    if (do_lookback)
     {
-        byte_buffer_t new_buf = super_big_rle_compress(buf.data, buf.len);
+        byte_buffer_t new_buf = lookback_compress(buf.data, buf.len);
         if (buf.data != data)
             BARPH_FREE(buf.data);
         buf = new_buf;
@@ -738,7 +654,7 @@ static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_rle, uint
     
     bytes_push(&real_buf, (const uint8_t *)"bRPH", 5);
     byte_push(&real_buf, do_diff);
-    byte_push(&real_buf, do_rle);
+    byte_push(&real_buf, do_lookback);
     byte_push(&real_buf, do_huff);
     bytes_push(&real_buf, (uint8_t *)&checksum, 4);
     bytes_push(&real_buf, buf.data, buf.len);
@@ -763,7 +679,7 @@ static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
         exit(0);
     }
     uint8_t do_diff = buf.data[5];
-    uint8_t do_rle = buf.data[6];
+    uint8_t do_lookback = buf.data[6];
     uint8_t do_huff = buf.data[7];
     
     uint32_t stored_checksum = buf.data[8]
@@ -784,9 +700,9 @@ static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
             BARPH_FREE(buf.data);
         buf = new_buf;
     }
-    if (do_rle)
+    if (do_lookback)
     {
-        byte_buffer_t new_buf = super_big_rle_decompress(buf.data, buf.len);
+        byte_buffer_t new_buf = lookback_decompress(buf.data, buf.len);
         if (buf.data != data + 12)
             BARPH_FREE(buf.data);
         buf = new_buf;
