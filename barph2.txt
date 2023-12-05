@@ -1,0 +1,27 @@
+0xxx xxxx +u8
+unsized rle, u8 contains one literal repeated <xxx xxxx> times
+
+10xx xxxx +u8 ...
+sized rle, ... contains <u8> literals repeated <xx xxxx> times
+
+110x xxxx u8 ...
+literals, ... contains <x xxxx u8> literals
+
+TODO:
+
+1110 xxxx
+4-bit lookback
+
+1111 0xxx +u8
+11-bit lookback
+
+1111 10xx +u16
+18-bit lookback
+
+1111 110x +u24
+18-bit lookback
+
+1111 1110 +u32
+32-bit lookback
+
+(lookback starts at 0)

@@ -172,6 +172,14 @@ static byte_buffer_t super_big_rle_compress(const uint8_t * input, size_t input_
     
     size_t i = 0;
     
+    // must be a power of 2
+    const size_t loc_cache_size = 4096;
+    const size_t loc_cursor_mask = loc_cache_size - 1;
+    
+    size_t test_locs[loc_cache_size];
+    memset(&test_locs, 0, sizeof(size_t) * loc_cache_size);
+    size_t test_loc_cursor = 0;
+    
     while (i < input_len)
     {
         size_t j = i;
@@ -220,22 +228,109 @@ outer:
         // if we didn't find any RLE, store a literal
         if (n == 0)
         {
-            uint16_t size;
-            for (size = 17; size < (1 << 14); size += 1)
+            // try doing lookback
+            const size_t min_lookback_size = 3;
+            
+            size_t remaining = input_len - i;
+            size_t found_loc = i;
+            size_t found_len = min_lookback_size - 1;
+            
+            if (remaining > min_lookback_size)
             {
-                if (i + size > input_len)
-                    break;
-                if (has_efficient_rle(&input[i + size], input_len - (i + size)))
-                    break;
+                for (size_t t = 0; t < loc_cache_size; t += 1)
+                {
+                    size_t loc = test_locs[(test_loc_cursor - 1 - t) & loc_cursor_mask];
+                    
+                    if (loc == 0)
+                        continue;
+                    if (i - loc > 0xFFFFFFFF)
+                        continue;
+                    
+                    size_t good_len = 0;
+                    for (size_t j = 0; j < (1 << 13); j += 1)
+                    {
+                        if (input[i + j] != input[loc + j])
+                            break;
+                        good_len += 1;
+                    }
+                    if (good_len > found_len)
+                    {
+                        found_loc = loc;
+                        found_len = good_len;
+                    }
+                    if (good_len >= 32 && t >= 256) // good enough
+                        break;
+                }
             }
-            size -= 1;
+            
+            test_locs[test_loc_cursor] = i;
+            test_loc_cursor = (test_loc_cursor + 1) & loc_cursor_mask;
+            
+            uint16_t size;
+            if (found_loc == i)
+            {
+                for (size = 17; size < (1 << 13); size += 1)
+                {
+                    if (i + size > input_len || has_efficient_rle(&input[i + size], input_len - (i + size)))
+                        break;
+                    if (found_loc != i && (input[found_loc + size] != input[i + size]))
+                        break;
+                }
+                size -= 1;
+            }
+            else
+                size = found_len;
+            
             if (size > input_len - i)
                 size = input_len - i;
             
+            if (found_loc != i)
+            {
+                size_t dist = i - found_loc;
+                if (dist <= 0xF)
+                    byte_push(&ret, 0xE0 | dist);
+                else if (dist <= 0x7FF)
+                {
+                    byte_push(&ret, 0xF0 | (dist & 0x7));
+                    byte_push(&ret, dist >> 3);
+                }
+                else if (dist <= 0x3FFFF)
+                {
+                    byte_push(&ret, 0xF8 | (dist & 0x3));
+                    byte_push(&ret, dist >> 2);
+                    byte_push(&ret, dist >> 10);
+                }
+                else if (dist <= 0x1FFFFF)
+                {
+                    byte_push(&ret, 0xFC | (dist & 0x1));
+                    byte_push(&ret, dist >> 1);
+                    byte_push(&ret, dist >> 9);
+                    byte_push(&ret, dist >> 17);
+                }
+                else if (dist <= 0xFFFFFFFF)
+                {
+                    byte_push(&ret, 0xFE);
+                    byte_push(&ret, dist);
+                    byte_push(&ret, dist >> 8);
+                    byte_push(&ret, dist >> 16);
+                    byte_push(&ret, dist >> 24);
+                }
+                else
+                {
+                    fprintf(stderr, "internal error: bad lookback match (goes too far)");
+                    exit(-1);
+                }
+            }
+            
             byte_push(&ret, 0xC0 | (size & 0x3F));
             byte_push(&ret, size >> 6);
-            for (size_t j = 0; j < size; ++j)
-                byte_push(&ret, input[i++]);
+            if (found_loc == i)
+            {
+                for (size_t j = 0; j < size; ++j)
+                    byte_push(&ret, input[i++]);
+            }
+            else
+                i += size;
             continue;
         }
         // if we found RLE, store the RLE
@@ -274,7 +369,9 @@ static byte_buffer_t super_big_rle_decompress(const uint8_t * input, size_t inpu
     
     while (i < input_len)
     {
+        size_t lookback_i = i;
         uint8_t dat = input[i++];
+        
         // literal
         // in RLE mode, bits 7 and 6 cannot be set at the same time, so this works as a signal
         if ((dat & 0xC0) == 0xC0)
