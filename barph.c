@@ -6,16 +6,27 @@
 
 int main(int argc, char ** argv)
 {
-    if (argc < 3 || (argv[1][0] != 'z' && argv[1][0] != 'x'))
+    if (argc < 4 || (argv[1][0] != 'z' && argv[1][0] != 'x'))
     {
         puts("usage: barph (z|x) <in> <out> [0|1] [0|1] [number]");
-        puts("z: compress <in> into <out>");
-        puts("x: decompress <in> into <out>");
+        puts("");
+        puts("z: compresses <in> into <out>");
+        puts("x: decompresses <in> into <out>");
+        puts("");
         puts("The three numeric arguments at the end are for z (compress) mode.");
+        puts("");
         puts("The first turns on lookback.");
+        puts("");
         puts("The second turns on Huffman coding.");
-        puts("The third turns on delta coding, with a byte distance. 3 works good for 3-channel RGB images, 4 works good for 3-channel RGBA images or 16-bit PCM audio. Only if they're not already compressed, though. Does not generally work well with most files, like text.");
-        puts("If given, the numeric arguments must be given in order. If not given, their defaults are 1, 1, 0. In other words, RLE and Huffman are enabled by default, but delta coding is not.");
+        puts("");
+        puts("The third turns on delta coding, with a byte distance. 3 does good for\n"
+            "3-channel RGB images, 4 does good for 4-channel RGBA images or 16-bit\n"
+            "PCM audio. Only if they're not already compressed, though. Does not\n"
+            "generally work well with most files, like text.");
+        puts("");
+        puts("If given, the numeric arguments must be given in order. If not given,\n"
+            "their defaults are 1, 1, 0. In other words, RLE and Huffman are enabled\n"
+            "by default, but delta coding is not.");
         return 0;
     }
     FILE * f = fopen(argv[2], "rb");

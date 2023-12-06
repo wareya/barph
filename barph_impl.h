@@ -124,34 +124,61 @@ static uint8_t bit_pop(bit_buffer_t * buf)
     return ret;
 }
 
-const size_t min_lookback_length = 4;
+const size_t min_lookback_length = 1;
+// size of the hash function output in bits.
+// must be at most 16. good values range from 16 to 12.
+#define BARPH_HASH_SIZE 16
+// log2 of the number of values per key (0 -> 1 value per key, 1 -> 2, 2 -> 4, 3 -> 8, 4 -> 16, etc)
+// higher values are slower, but result in smaller files. good values range from 8 to 2 (8 at a hash size of 12, etc.)
 #define BARPH_HASHTABLE_KEY_SHL 4
-#define BARPH_LOOKBACK_BIAS 2
-uint64_t hashtable[(1<<16)<<BARPH_HASHTABLE_KEY_SHL];
+// heuristic/fudge
+#define BARPH_LOOKBACK_BIAS -1
+
+// hashtable itself, with multiple cells for each key based on the SHL define
+uint64_t hashtable[(1<<BARPH_HASH_SIZE)<<BARPH_HASHTABLE_KEY_SHL];
+// hashtable of current cursor for overwriting, from 0 to just under (1<<SHL)
+uint8_t hashtable_i[1<<BARPH_HASH_SIZE];
+
+// hashtable hashing constants
+#define BRAPH_HASH_A_MULT 0x4C35
+#define BRAPH_HASH_B_MASK 0x5813
+#define BRAPH_HASH_B_MULT 0xACE1
 
 // bytes must point to four characters
 void hashmap_insert(const uint8_t * bytes, uint64_t value)
 {
-    uint16_t a = (bytes[0] | (((uint16_t)bytes[1]) << 8)) * 0x4C35;
-    uint16_t b = ((bytes[2] | (((uint16_t)bytes[3]) << 8)) ^ 0x5813) * 0xACE1;
-    uint32_t key = ((uint32_t)(a ^ b)) << BARPH_HASHTABLE_KEY_SHL;
+    // hashing function (can be anything; go ahead and optimize it as long as it doesn't result in tons of collisions)
+    uint16_t a = (bytes[0] | (((uint16_t)bytes[1]) << 8)) * BRAPH_HASH_A_MULT;
+    uint16_t b = ((bytes[2] | (((uint16_t)bytes[3]) << 8)) ^ BRAPH_HASH_B_MASK) * BRAPH_HASH_B_MULT;
+    uint32_t key_i = ((uint32_t)(a ^ b));
+    key_i &= (1 << BARPH_HASH_SIZE) - 1;
+    uint32_t key = key_i << BARPH_HASHTABLE_KEY_SHL;
     
-    for(int i = (1 << BARPH_HASHTABLE_KEY_SHL) - 1; i > 0; i -= 1)
-        hashtable[key + i] = hashtable[key + i - 1];
-    
-    hashtable[key] = value;
+    // otherwise just overwrite the value after the newest value
+    hashtable[key + hashtable_i[key_i]] = value;
+    hashtable_i[key_i] = (hashtable_i[key_i] + 1) & ((1 << BARPH_HASHTABLE_KEY_SHL) - 1);
 }
-// bytes must point to four characters
-uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer, const size_t buffer_len)
+// bytes must point to four characters and be inside of buffer
+uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer, const size_t buffer_len, uint64_t * min_len)
 {
-    uint16_t a = (bytes[0] | (((uint16_t)bytes[1]) << 8)) * 0x4C35;
-    uint16_t b = ((bytes[2] | (((uint16_t)bytes[3]) << 8)) ^ 0x5813) * 0xACE1;
-    uint32_t key = ((uint32_t)(a ^ b)) << BARPH_HASHTABLE_KEY_SHL;
+    // hashing function (can be anything; go ahead and optimize it as long as it doesn't result in tons of collisions)
+    uint16_t a = (bytes[0] | (((uint16_t)bytes[1]) << 8)) * BRAPH_HASH_A_MULT;
+    uint16_t b = ((bytes[2] | (((uint16_t)bytes[3]) << 8)) ^ BRAPH_HASH_B_MASK) * BRAPH_HASH_B_MULT;
+    uint32_t key_i = ((uint32_t)(a ^ b));
+    key_i &= (1 << BARPH_HASH_SIZE) - 1;
+    uint32_t key = key_i << BARPH_HASHTABLE_KEY_SHL;
+    
+    // look for match within key
     uint64_t best = -1;
-    uint64_t best_len = 3;
+    uint64_t best_len = min_lookback_length - 1;
     for (int j = 0; j < (1 << BARPH_HASHTABLE_KEY_SHL); j++)
     {
-        uint64_t value = hashtable[key + j];
+        int n = (hashtable_i[key_i] + (1 << BARPH_HASHTABLE_KEY_SHL) - 1 - j) & ((1 << BARPH_HASHTABLE_KEY_SHL) - 1);
+        uint64_t value = hashtable[key + n];
+        // the above is technically correct for how the keys are rotated, BUT:
+        // uint64_t value = hashtable[key + j]; (which is technically wrong) works ALMOST as well.
+        
+        // find longest match
         uint64_t len = 0;
         for (size_t i = 0; i < buffer_len - value; i++)
         {
@@ -159,35 +186,44 @@ uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer, const size_t
                 break;
             len += 1;
         }
-        if (len > best_len)
+        if (len > best_len || (len == best_len && value > best))
         {
             best_len = len;
             best = value;
         }
+        if (len >= 256) // good enough
+            break;
     }
+    
+    *min_len = best_len;
     return best;
 }
 
 uint64_t hashmap_get_efficient(const uint64_t i, const uint8_t * input, const size_t input_len, uint64_t * in_size)
 {
+    // here we only return the hashmap hit if it would be efficient to code it
+    
     if (i >= input_len)
         return -1;
     size_t remaining = input_len - i;
     if (remaining <= min_lookback_length)
         return -1;
     
-    uint64_t found_loc = hashmap_get(&input[i], input, input_len);
+    uint64_t min_len = 0;
+    uint64_t found_loc = hashmap_get(&input[i], input, input_len, &min_len);
     size_t dist = i - found_loc;
     if (found_loc != (uint64_t)-1 && found_loc < i && dist <= 0x3FFFFFFFF)
     {
         size_t size;
-        for (size = 4; size < (1 << 8); size += 1)
+        for (size = min_len; size < (1 << 15); size += 1)
         {
             if (size >= remaining)
                 break;
             if (input[i + size] != input[found_loc + size])
                 break;
         }
+        if (size >= (1 << 15))
+            size = 0x7FFF;
         
         size_t overhead =
             dist <= 0x3F ? 1 :
@@ -208,6 +244,8 @@ uint64_t hashmap_get_efficient(const uint64_t i, const uint8_t * input, const si
 static byte_buffer_t lookback_compress(const uint8_t * input, size_t input_len)
 {
     memset(&hashtable, 0, sizeof(hashtable));
+    memset(&hashtable_i, 0, sizeof(hashtable_i));
+    
     byte_buffer_t ret = {0, 0, 0};
     
     byte_push(&ret, input_len & 0xFF);
@@ -236,29 +274,30 @@ static byte_buffer_t lookback_compress(const uint8_t * input, size_t input_len)
                 
                 size_t dist = i - found_loc;
                 
+                // push lookback distance
                 if (dist <= 0x3F)
-                    byte_push(&ret, 0x80 | (dist & 0x3F));
+                    byte_push(&ret, 1 | (dist << 2));
                 else if (dist <= 0x1FFF)
                 {
-                    byte_push(&ret, 0xC0 | (dist & 0x1F));
+                    byte_push(&ret, 3 | (dist << 3));
                     byte_push(&ret, dist >> 5);
                 }
                 else if (dist <= 0xFFFFF)
                 {
-                    byte_push(&ret, 0xE0 | (dist & 0x0F));
+                    byte_push(&ret, 7 | (dist << 4));
                     byte_push(&ret, dist >> 4);
                     byte_push(&ret, dist >> 12);
                 }
                 else if (dist <= 0x7FFFFF)
                 {
-                    byte_push(&ret, 0xF0 | (dist & 7));
+                    byte_push(&ret, 0xF | (dist << 5));
                     byte_push(&ret, dist >> 3);
                     byte_push(&ret, dist >> 11);
                     byte_push(&ret, dist >> 19);
                 }
                 else if (dist <= 0x3FFFFFFFF)
                 {
-                    byte_push(&ret, 0xF8 | (dist & 3));
+                    byte_push(&ret, 0x1F | (dist << 6));
                     byte_push(&ret, dist >> 2);
                     byte_push(&ret, dist >> 10);
                     byte_push(&ret, dist >> 18);
@@ -269,10 +308,19 @@ static byte_buffer_t lookback_compress(const uint8_t * input, size_t input_len)
                     fprintf(stderr, "internal error: bad lookback match (goes too far)");
                     exit(-1);
                 }
-                // push literal info
-                byte_push(&ret, size);
-                // the actual bytes are not pushed in lookback mode
-                i += size;
+                
+                // push size
+                byte_push(&ret, size << 1);
+                if (size > 0x7F)
+                    byte_push(&ret, size >> 7);
+                
+                // advance cursor and update hashmap
+                for (size_t j = 0; j < size; ++j)
+                {
+                    if (i + 4 < input_len)
+                        hashmap_insert(&input[i], i);
+                    i += 1;
+                }
                 continue;
             }
         }
@@ -285,6 +333,9 @@ static byte_buffer_t lookback_compress(const uint8_t * input, size_t input_len)
             uint64_t found_loc = hashmap_get_efficient(i + size, input, input_len, &_size_unused);
             if (found_loc != (uint64_t)-1)
                 break;
+            // need to update the hashmap mid-literal
+            if (i + size + 4 < input_len)
+                hashmap_insert(&input[i + size], i);
             size += 1;
         }
         if (size == (1 << 14))
@@ -296,23 +347,24 @@ static byte_buffer_t lookback_compress(const uint8_t * input, size_t input_len)
         // we store short and long literals slightly differently, with a bit flag to differentiate
         if (size > 0x3F)
         {
-            byte_push(&ret, (size & 0x3F) | 0x40);
+            byte_push(&ret, (size << 2) | 2);
             byte_push(&ret, size >> 6);
         }
         else
-            byte_push(&ret, size & 0x3F);
+            byte_push(&ret, (size << 2));
         
         for (size_t j = 0; j < size; ++j)
-        {
-            hashmap_insert(&input[i], i);
             byte_push(&ret, input[i++]);
-        }
     }
     printf("lookbacks found: %lld\n", l);
     
     return ret;
 }
 
+// On error, the output byte_buffer_t's cap will be 0 *AND* its len will be greater than 0.
+// In such cases, the exact value of len indicates the particular error.
+// 1: malformed lookback
+// 2: malformed length
 static byte_buffer_t lookback_decompress(const uint8_t * input, size_t input_len)
 {
     size_t i = 0;
@@ -336,39 +388,60 @@ static byte_buffer_t lookback_decompress(const uint8_t * input, size_t input_len
         uint8_t dat = input[i++];
         
         // lookback mode
-        if ((dat & 0x80) == 0x80)
+        if (dat & 1)
         {
             size_t loc = 0;
-            if ((dat & 0xC0) == 0x80)
-                loc = dat & 0x3F;
-            else if ((dat & 0xE0) == 0xC0)
+            if (!(dat & 2))
+                loc = dat >> 2;
+            else if (!(dat & 4))
             {
-                loc = dat & 0x1F;
+                loc = dat >> 3;
                 loc |= ((uint32_t)input[i++]) << 5;
             }
-            else if ((dat & 0xF0) == 0xE0)
+            else if (!(dat & 8))
             {
-                loc = dat & 0x0F;
+                loc = dat >> 4;
                 loc |= ((uint32_t)input[i++]) << 4;
                 loc |= ((uint32_t)input[i++]) << 12;
             }
-            else if ((dat & 0xF8) == 0xF0)
+            else if (!(dat & 0x10))
             {
-                loc = dat & 7;
+                loc = dat >> 5;
                 loc |= ((uint32_t)input[i++]) << 3;
                 loc |= ((uint32_t)input[i++]) << 11;
                 loc |= ((uint32_t)input[i++]) << 19;
             }
-            else if ((dat & 0xFC) == 0xF8)
+            else if (!(dat & 0x20))
             {
-                loc = dat & 3;
+                loc = dat >> 6;
                 loc |= ((uint32_t)input[i++]) << 2;
                 loc |= ((uint32_t)input[i++]) << 10;
                 loc |= ((uint32_t)input[i++]) << 18;
                 loc |= ((uint32_t)input[i++]) << 26;
             }
             
-            uint16_t size = input[i++];
+            // bounds limit
+            if (loc >= ret.len)
+            {
+                fprintf(stderr, "error: malformed compression data (lookback extends beyond start of file)\n");
+                ret.len = 1;
+                ret.cap = 0;
+                return ret;
+            }
+            
+            uint8_t size_dat = input[i++];
+            uint16_t size = size_dat >> 1;
+            if (size_dat & 1)
+            {
+                size |= ((uint16_t)input[i++]) << 7;
+                if (i >= input_len)
+                {
+                    fprintf(stderr, "error: malformed compression data (tried to read past end of file)\n");
+                    ret.len = 2;
+                    ret.cap = 0;
+                    return ret;
+                }
+            }
             
             // bytes_push uses memcpy, which doesn't work if there's any overlap.
             // overlap is allowed here, so we have to copy bytes manually.
@@ -378,10 +451,19 @@ static byte_buffer_t lookback_decompress(const uint8_t * input, size_t input_len
         // literal mode
         else
         {
-            uint16_t size = dat & 0x3F;
+            uint16_t size = dat >> 2;
             // this bit is true if the literal is long and has an extra length byte
-            if (dat & 0x40)
+            if (dat & 2)
+            {
                 size |= ((uint16_t)input[i++]) << 6;
+                if (i >= input_len)
+                {
+                    fprintf(stderr, "error: malformed compression data (tried to read past end of file)\n");
+                    ret.len = 2;
+                    ret.cap = 0;
+                    return ret;
+                }
+            }
             
             bytes_push(&ret, &input[i], size);
             i += size;
@@ -652,7 +734,7 @@ static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_lookback,
     byte_buffer_t real_buf = {0, 0, 0};
     bytes_reserve(&real_buf, buf.len + 8 + 4);
     
-    bytes_push(&real_buf, (const uint8_t *)"bRPH", 5);
+    bytes_push(&real_buf, (const uint8_t *)"bRPH\2", 5);
     byte_push(&real_buf, do_diff);
     byte_push(&real_buf, do_lookback);
     byte_push(&real_buf, do_huff);
@@ -673,7 +755,7 @@ static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
     
     byte_buffer_t buf = {data, len, len};
     
-    if (buf.len < 8 || memcmp(buf.data, "bRPH", 5) != 0)
+    if (buf.len < 8 || memcmp(buf.data, "bRPH\2", 5) != 0)
     {
         puts("invalid barph file");
         exit(0);
