@@ -172,7 +172,7 @@ static inline void hashmap_insert(const uint8_t * bytes, uint64_t value)
     hashtable_i[key_i] = (hashtable_i[key_i] + 1) & hash_shl_mask;
 }
 // bytes must point to four characters and be inside of buffer
-static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer, const size_t buffer_len, uint64_t * min_len, const uint8_t deep)
+static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer, const size_t buffer_len, uint64_t * min_len, const uint8_t final)
 {
     const uint32_t key_i = hashmap_hash(bytes);
     const uint32_t key = key_i << LOH_HASHTABLE_KEY_SHL;
@@ -180,37 +180,49 @@ static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer
     // look for match within key
     size_t i = (size_t)(bytes - buffer);
     uint64_t best = -1;
-    uint64_t best_len = min_lookback_length - 1;
+    uint64_t best_size = min_lookback_length - 1;
     uint32_t best_j = 0;
     for (uint32_t j = 0; j < hash_shl_max; j++)
     {
-        const uint64_t value = hashtable[key + j];
+        const int n = (hashtable_i[key_i] + hash_shl_max - 1 - j) & hash_shl_mask;
+        const uint64_t value = hashtable[key + n];
+        //const uint64_t value = hashtable[key + j];
+        
         if (value >= i)
             break;
         
         // find longest match
-        uint64_t len = 0;
-        while (len + i < buffer_len && bytes[len] == buffer[value + len])
-            len += 1;
-        
-        if (len > best_len || (len == best_len && value > best))
+        const uint64_t chunk_size = 16;
+        const uint64_t remaining = buffer_len - i;
+        uint64_t size = 0;
+        while (size + chunk_size < remaining)
         {
-            // other node bit was expensive to test; axe it)
-            if (best_len > 64)
+            if (memcmp(&bytes[size], &buffer[value + size], chunk_size) == 0)
+                size += chunk_size;
+            else
+                break;
+        }
+        while (size < remaining && bytes[size] == buffer[value + size])
+            size += 1;
+        
+        if (size > best_size || (size == best_size && value > best))
+        {
+            // other entry hit was expensive to test; axe it
+            if (best_size > 64)
                 hashtable[key + best_j] = 0;
             
-            best_len = len;
+            best_size = size;
             best = value;
             best_j = j;
             
-            if (best_len >= 256) // good enough
+            if (best_size >= 256) // good enough
                 break;
-            if (!deep && best_len >= 8)
+            if (!final && best_size >= 16)
                 break;
         }
     }
     
-    *min_len = best_len;
+    *min_len = best_size;
     return best;
 }
 
@@ -232,6 +244,14 @@ static inline uint64_t hashmap_get_if_efficient(const uint64_t i, const uint8_t 
     {
         if (final)
         {
+            const uint64_t chunk_size = 1;
+            while (size + chunk_size < remaining)
+            {
+                if (memcmp(&input[i + size], &input[found_loc + size], chunk_size) == 0)
+                    size += chunk_size;
+                else
+                    break;
+            }
             while (size < remaining && input[i + size] == input[found_loc + size])
                 size += 1;
         }
@@ -352,6 +372,7 @@ static byte_buffer_t lookback_compress(const uint8_t * input, uint64_t input_len
         }
         
         // store a literal if we found no lookback
+        // FIXME: maybe test in chunks with memcpy...?
         uint16_t size = 1;
         while (size < (1 << 14) && i + size < input_len)
         {
