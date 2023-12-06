@@ -62,18 +62,54 @@ static void bits_push(bit_buffer_t * buf, uint64_t data, uint8_t bits)
 {
     if (bits == 0)
         return;
+    
+    if (buf->buffer.len == 0)
+        byte_push(&buf->buffer, 0);
+    
+    if (bits >= 8 - buf->bit_index)
+    {
+        uint8_t avail = 8 - buf->bit_index;
+        uint64_t mask = (1 << avail) - 1;
+        buf->buffer.data[buf->buffer.len - 1] |= (data & mask) << buf->bit_index;
+        
+        byte_push(&buf->buffer, 0);
+        
+        buf->bit_index = 0;
+        buf->byte_index += 1;
+        
+        bits -= avail;
+        data >>= avail;
+        
+        while (bits >= 8)
+        {
+            buf->buffer.data[buf->buffer.len - 1] |= data & 0xFF;
+            bits -= 8;
+            data >>= 8;
+            byte_push(&buf->buffer, 0);
+            buf->byte_index += 1;
+        }
+    }
+    
+    if (bits == 0)
+        return;
+    
+    if (bits < 8 - buf->bit_index)
+    {
+        uint64_t mask = (1 << bits) - 1;
+        buf->buffer.data[buf->buffer.len - 1] |= (data & mask) << buf->bit_index;
+        buf->bit_index += bits;
+        buf->bit_count += bits;
+        return;
+    }
     for (uint8_t n = 0; n < bits; n += 1)
     {
-        if (buf->bit_index >= 8 || buf->buffer.len == 0)
+        if (buf->bit_index >= 8)
         {
             byte_push(&buf->buffer, 0);
-            if (buf->bit_index >= 8)
-            {
-                buf->bit_index -= 8;
-                buf->byte_index += 1;
-            }
+            buf->bit_index -= 8;
+            buf->byte_index += 1;
         }
-        buf->buffer.data[buf->buffer.len - 1] |= (!!(data & ((uint64_t)1 << n))) << buf->bit_index;
+        buf->buffer.data[buf->buffer.len - 1] |= ((data >> n) & 1) << buf->bit_index;
         buf->bit_index += 1;
         buf->bit_count += 1;
     }
@@ -125,6 +161,9 @@ static uint8_t bit_pop(bit_buffer_t * buf)
 
 static const size_t min_lookback_length = 1;
 
+// for finding lookback matches, we use a fast lru cache based on a hash table
+// collisions and identical matches share eviction; the number of values per hash is static
+
 #define LOH_HASH_LENGTH 4
 // size of the hash function output in bits.
 // must be at most 32, but values significantly above 16 are a Bad Idea.
@@ -167,10 +206,10 @@ static inline void hashmap_insert(const uint8_t * bytes, uint64_t value)
     const uint32_t key_i = hashmap_hash(bytes);
     const uint32_t key = key_i << LOH_HASHTABLE_KEY_SHL;
     
-    // otherwise just overwrite the value after the newest value
     hashtable[key + hashtable_i[key_i]] = value;
     hashtable_i[key_i] = (hashtable_i[key_i] + 1) & hash_shl_mask;
 }
+
 // bytes must point to four characters and be inside of buffer
 static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer, const size_t buffer_len, uint64_t * min_len, const uint8_t final)
 {
@@ -372,7 +411,6 @@ static byte_buffer_t lookback_compress(const uint8_t * input, uint64_t input_len
         }
         
         // store a literal if we found no lookback
-        // FIXME: maybe test in chunks with memcpy...?
         uint16_t size = 1;
         while (size < (1 << 14) && i + size < input_len)
         {
@@ -538,7 +576,12 @@ static byte_buffer_t lookback_decompress(const uint8_t * input, size_t input_len
 typedef struct _huff_node {
     struct _huff_node * children[2];
     int64_t freq;
-    bit_buffer_t code;
+    // a huffman code for a symbol from a string of length N will never exceed log2(N) in length
+    // (e.g. for a 65kbyte file, it's impossible for there to both be enough unique symbols AND
+    //  an unbalanced-enough symbol distribution that the huffman tree is more than 16 levels deep)
+    // so, storing codes from a 64-bit-addressed file in a 64-bit number is fine
+    uint64_t code;
+    uint8_t code_len;
     uint8_t symbol;
 } huff_node_t;
 
@@ -558,7 +601,11 @@ static void free_huff_nodes(huff_node_t * node)
 
 static void push_code(huff_node_t * node, uint8_t bit)
 {
-    bit_push(&node->code, bit);
+    //node->code |= (bit & 1) << node->code_len;
+    node->code <<= 1;
+    node->code |= bit & 1;
+    node->code_len += 1;
+    
     if (node->children[0])
         push_code(node->children[0], bit);
     if (node->children[1])
@@ -571,13 +618,13 @@ static int count_compare(const void * a, const void * b)
     return n > 0 ? 1 : n < 0 ? -1 : 0;
 }
 
-static void push_huff_node(bit_buffer_t * buf, huff_node_t * node)
+static void push_huff_node(bit_buffer_t * buf, huff_node_t * node, uint64_t depth)
 {
     if (node->children[0] && node->children[1])
     {
         bit_push(buf, 1);
-        push_huff_node(buf, node->children[0]);
-        push_huff_node(buf, node->children[1]);
+        push_huff_node(buf, node->children[0], depth + 1);
+        push_huff_node(buf, node->children[1], depth + 1);
     }
     else
     {
@@ -591,7 +638,8 @@ static huff_node_t * pop_huff_node(bit_buffer_t * buf)
     huff_node_t * ret;
     ret = alloc_huff_node();
     ret->symbol = 0;
-    memset(&ret->code, 0, sizeof(bit_buffer_t));
+    ret->code = 0;
+    ret->code_len = 0;
     ret->freq = 0;
     ret->children[0] = 0;
     ret->children[1] = 0;
@@ -631,7 +679,8 @@ static bit_buffer_t huff_pack(uint8_t * data, size_t len)
     {
         unordered_dict[i] = alloc_huff_node();
         unordered_dict[i]->symbol = counts[i] & 0xFF;
-        memset(&unordered_dict[i]->code, 0, sizeof(bit_buffer_t));
+        unordered_dict[i]->code = 0;
+        unordered_dict[i]->code_len = 0;
         unordered_dict[i]->freq = counts[i] >> 8;
         unordered_dict[i]->children[0] = 0;
         unordered_dict[i]->children[1] = 0;
@@ -643,58 +692,40 @@ static bit_buffer_t huff_pack(uint8_t * data, size_t len)
         dict[unordered_dict[i]->symbol] = unordered_dict[i];
     
     // set up tree generation queues
-    huff_node_t * queue_in[256];
-    size_t queue_in_count = 256;
+    huff_node_t * queue[512];
+    memset(queue, 0, sizeof(queue));
     
-    huff_node_t * queue_out[256];
-    size_t queue_out_count = 0;
+    size_t queue_count = 256;
     
     for (size_t i = 0; i < 256; i += 1)
-        queue_in[i] = unordered_dict[i];
-    for (size_t i = 0; i < 256; i += 1)
-        queue_out[i] = 0;
+        queue[i] = unordered_dict[i];
     
     // remove zero-frequency items from the input queue
-    while (queue_in[queue_in_count - 1]->freq == 0 && queue_in_count > 0)
+    while (queue[queue_count - 1]->freq == 0 && queue_count > 0)
     {
-        free_huff_nodes(queue_in[queue_in_count - 1]);
-        queue_in_count -= 1;
+        free_huff_nodes(queue[queue_count - 1]);
+        queue_count -= 1;
     }
     
     // start pumping through the queues
-    while (queue_in_count + queue_out_count > 1)
+    while (queue_count > 1)
     {
-        if (queue_out_count > 250)
+        huff_node_t * lowest = queue[queue_count - 1];
+        huff_node_t * next_lowest = queue[queue_count - 2];
+        
+        queue_count -= 2;
+        
+        if (!lowest || !next_lowest)
         {
-            fprintf(stderr, "Huffman tree generation failed; vastly exceeded maximum tree depth.");
+            fprintf(stderr, "LOH internal error: failed to find lowest-frequency nodes\n");
             exit(-1);
         }
-        
-        // find lowest-frequency items
-        huff_node_t * nodes[4] = {0, 0, 0, 0};
-        nodes[0] = (queue_in_count  >= 1) ? (queue_in [queue_in_count  - 1]) : 0;
-        nodes[1] = (queue_in_count  >= 2) ? (queue_in [queue_in_count  - 2]) : 0;
-        nodes[2] = (queue_out_count >= 1) ? (queue_out[queue_out_count - 1]) : 0;
-        nodes[3] = (queue_out_count >= 2) ? (queue_out[queue_out_count - 2]) : 0;
-        
-        huff_node_t * lowest = 0;
-        for (size_t i = 0; i < 4; i++)
-            if (!lowest || (nodes[i] && nodes[i]->freq < lowest->freq))
-                lowest = nodes[i];
-        
-        huff_node_t * next_lowest = 0;
-        for (size_t i = 0; i < 4; i++)
-            if (nodes[i] != lowest && (!next_lowest || (nodes[i] && nodes[i]->freq < next_lowest->freq)))
-                next_lowest = nodes[i];
-        
-        // shrink queues depending on which nodes were gotten from which queue
-        queue_in_count  -=  (lowest == nodes[0] || lowest == nodes[1]) +  (next_lowest == nodes[0] || next_lowest == nodes[1]);
-        queue_out_count -= !(lowest == nodes[0] || lowest == nodes[1]) + !(next_lowest == nodes[0] || next_lowest == nodes[1]);
         
         // make new node
         huff_node_t * new_node = alloc_huff_node();
         new_node->symbol = 0;
-        memset(&new_node->code, 0, sizeof(bit_buffer_t));
+        new_node->code = 0;
+        new_node->code_len = 0;
         new_node->freq = lowest->freq + next_lowest->freq;
         new_node->children[0] = lowest;
         new_node->children[1] = next_lowest;
@@ -702,11 +733,23 @@ static bit_buffer_t huff_pack(uint8_t * data, size_t len)
         push_code(new_node->children[0], 0);
         push_code(new_node->children[1], 1);
         
-        // insert new out-queue element at bottom
-        queue_out_count += 1;
-        for (size_t i = queue_out_count; i > 0; i -= 1)
-            queue_out[i] = queue_out[i-1];
-        queue_out[0] = new_node;
+        // insert new element at end of array, then bubble it down to the correct place
+        queue[queue_count] = new_node;
+        queue_count += 1;
+        if (queue_count > 512)
+        {
+            fprintf(stderr, "LOH internal error: huffman tree generation too deep\n");
+            exit(-1);
+        }
+        for (size_t i = queue_count - 1; i > 0; i -= 1)
+        {
+            if (queue[i]->freq >= queue[i-1]->freq)
+            {
+                huff_node_t * temp = queue[i];
+                queue[i] = queue[i-1];
+                queue[i-1] = temp;
+            }
+        }
     }
     
     // set up buffers and start pushing data to them
@@ -716,20 +759,15 @@ static bit_buffer_t huff_pack(uint8_t * data, size_t len)
     
     bits_push(&ret, len, 8*8);
     
-    push_huff_node(&ret, queue_out[0]);
+    push_huff_node(&ret, queue[0], 0);
     
-    for(size_t i = 0; i < len; i++)
+    for (size_t i = 0; i < len; i++)
     {
         uint8_t c = data[i];
-        for (size_t n = 0; n < dict[c]->code.bit_count; n++)
-        {
-            size_t m = dict[c]->code.bit_count - n - 1;
-            int bit = (dict[c]->code.buffer.data[m / 8] >> ((m % 8))) & 1;
-            bit_push(&ret, bit);
-        }
+        bits_push(&ret, dict[c]->code, dict[c]->code_len);
     }
     
-    free_huff_nodes(queue_out[0]);
+    free_huff_nodes(queue[0]);
     
     return ret;
 }
