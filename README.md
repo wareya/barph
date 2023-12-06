@@ -16,6 +16,8 @@ No, I don't know why the decompression is so slow.
 
 ## Comparison
 
+**(not yet updated)**
+
 Made with the `zip`, `unzip`, and `lz4` commands from msys2's repositories, and loh.c compiled as -O3 (without -march=native). Dashes refer to compression level. loh doesn't have a 'standard' compression level setting, only technique flags, so the technique flags that differ from the defaults are noted instead (l means lookback, h means huffman, d means delta). The best loh flags are used for the given file. If the default flags are the best, alternative flags are not attempted.
 
 file | compressed size | encode time (best of 3) | decode time (best of 3)
