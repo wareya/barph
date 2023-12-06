@@ -24,7 +24,7 @@ typedef struct {
     size_t cap;
 } byte_buffer_t;
 
-static void bytes_reserve(byte_buffer_t * buf, size_t extra)
+static inline void bytes_reserve(byte_buffer_t * buf, size_t extra)
 {
     if (buf->cap < 8)
         buf->cap = 8;
@@ -32,13 +32,13 @@ static void bytes_reserve(byte_buffer_t * buf, size_t extra)
         buf->cap <<= 1;
     buf->data = (uint8_t *)LOH_REALLOC(buf->data, buf->cap);
 }
-static void bytes_push(byte_buffer_t * buf, const uint8_t * bytes, size_t count)
+static inline void bytes_push(byte_buffer_t * buf, const uint8_t * bytes, size_t count)
 {
     bytes_reserve(buf, count);
     memcpy(&buf->data[buf->len], bytes, count);
     buf->len += count;
 }
-static void byte_push(byte_buffer_t * buf, uint8_t byte)
+static inline void byte_push(byte_buffer_t * buf, uint8_t byte)
 {
     if (buf->len == buf->cap)
     {
@@ -58,14 +58,16 @@ typedef struct {
     uint8_t bit_index;
 } bit_buffer_t;
 
-static void bits_push(bit_buffer_t * buf, uint64_t data, uint8_t bits)
+static inline void bits_push(bit_buffer_t * buf, uint64_t data, uint8_t bits)
 {
     if (bits == 0)
         return;
     
+    // push byte if there's nothing to write bits into
     if (buf->buffer.len == 0)
         byte_push(&buf->buffer, 0);
     
+    // if we have more bits to push than are available, push as many bits as possible without adding new bytes all at once
     if (bits >= 8 - buf->bit_index)
     {
         uint8_t avail = 8 - buf->bit_index;
@@ -80,6 +82,7 @@ static void bits_push(bit_buffer_t * buf, uint64_t data, uint8_t bits)
         bits -= avail;
         data >>= avail;
         
+        // then push any remaining whole bytes worth of bits all at once
         while (bits >= 8)
         {
             buf->buffer.data[buf->buffer.len - 1] |= data & 0xFF;
@@ -90,10 +93,8 @@ static void bits_push(bit_buffer_t * buf, uint64_t data, uint8_t bits)
         }
     }
     
-    if (bits == 0)
-        return;
-    
-    if (bits < 8 - buf->bit_index)
+    // push any remaining bits (we'll be at less than 8 bits to write and more than 8 bits available)
+    if (bits > 0)
     {
         uint64_t mask = (1 << bits) - 1;
         buf->buffer.data[buf->buffer.len - 1] |= (data & mask) << buf->bit_index;
@@ -101,20 +102,8 @@ static void bits_push(bit_buffer_t * buf, uint64_t data, uint8_t bits)
         buf->bit_count += bits;
         return;
     }
-    for (uint8_t n = 0; n < bits; n += 1)
-    {
-        if (buf->bit_index >= 8)
-        {
-            byte_push(&buf->buffer, 0);
-            buf->bit_index -= 8;
-            buf->byte_index += 1;
-        }
-        buf->buffer.data[buf->buffer.len - 1] |= ((data >> n) & 1) << buf->bit_index;
-        buf->bit_index += 1;
-        buf->bit_count += 1;
-    }
 }
-static void bit_push(bit_buffer_t * buf, uint8_t data)
+static inline void bit_push(bit_buffer_t * buf, uint8_t data)
 {
     if (buf->bit_index >= 8 || buf->buffer.len == 0)
     {
@@ -129,7 +118,7 @@ static void bit_push(bit_buffer_t * buf, uint8_t data)
     buf->bit_index += 1;
     buf->bit_count += 1;
 }
-static uint64_t bits_pop(bit_buffer_t * buf, uint8_t bits)
+static inline uint64_t bits_pop(bit_buffer_t * buf, uint8_t bits)
 {
     if (bits == 0)
         return 0;
@@ -146,7 +135,7 @@ static uint64_t bits_pop(bit_buffer_t * buf, uint8_t bits)
     }
     return ret;
 }
-static uint8_t bit_pop(bit_buffer_t * buf)
+static inline uint8_t bit_pop(bit_buffer_t * buf)
 {
     if (buf->bit_index >= 8)
     {
