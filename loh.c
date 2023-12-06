@@ -2,13 +2,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "barph_impl.h"
+#include "loh_impl.h"
 
 int main(int argc, char ** argv)
 {
     if (argc < 4 || (argv[1][0] != 'z' && argv[1][0] != 'x'))
     {
-        puts("usage: barph (z|x) <in> <out> [0|1] [0|1] [number]");
+        puts("usage: loh (z|x) <in> <out> [0|1] [0|1] [number]");
         puts("");
         puts("z: compresses <in> into <out>");
         puts("x: decompresses <in> into <out>");
@@ -58,7 +58,7 @@ int main(int argc, char ** argv)
         if (argc > 6)
             do_diff = strtol(argv[6], 0, 10);
         
-        buf.data = barph_compress(buf.data, buf.len, do_rle, do_huff, do_diff, &buf.len);
+        buf.data = loh_compress(buf.data, buf.len, do_rle, do_huff, do_diff, &buf.len);
         
         FILE * f2 = fopen(argv[3], "wb");
         
@@ -68,7 +68,7 @@ int main(int argc, char ** argv)
     }
     else if (argv[1][0] == 'x')
     {
-        buf.data = barph_decompress(buf.data, buf.len, &buf.len);
+        buf.data = loh_decompress(buf.data, buf.len, &buf.len);
         
         if (buf.data)
         {

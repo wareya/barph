@@ -1,21 +1,21 @@
-#ifndef BARPH_IMPL_HEADER
-#define BARPH_IMPL_HEADER
+#ifndef LOH_IMPL_HEADER
+#define LOH_IMPL_HEADER
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
-#ifndef BARPH_REALLOC
-#define BARPH_REALLOC realloc
+#ifndef LOH_REALLOC
+#define LOH_REALLOC realloc
 #endif
 
-#ifndef BARPH_MALLOC
-#define BARPH_MALLOC malloc
+#ifndef LOH_MALLOC
+#define LOH_MALLOC malloc
 #endif
 
-#ifndef BARPH_FREE
-#define BARPH_FREE free
+#ifndef LOH_FREE
+#define LOH_FREE free
 #endif
 
 
@@ -31,7 +31,7 @@ static void bytes_reserve(byte_buffer_t * buf, size_t extra)
         buf->cap = 8;
     while (buf->len + extra > buf->cap)
         buf->cap <<= 1;
-    buf->data = (uint8_t *)BARPH_REALLOC(buf->data, buf->cap);
+    buf->data = (uint8_t *)LOH_REALLOC(buf->data, buf->cap);
 }
 static void bytes_push(byte_buffer_t * buf, const uint8_t * bytes, size_t count)
 {
@@ -46,7 +46,7 @@ static void byte_push(byte_buffer_t * buf, uint8_t byte)
         buf->cap = buf->cap << 1;
         if (buf->cap < 8)
             buf->cap = 8;
-        buf->data = (uint8_t *)BARPH_REALLOC(buf->data, buf->cap);
+        buf->data = (uint8_t *)LOH_REALLOC(buf->data, buf->cap);
     }
     buf->data[buf->len] = byte;
     buf->len += 1;
@@ -127,17 +127,17 @@ static uint8_t bit_pop(bit_buffer_t * buf)
 const size_t min_lookback_length = 1;
 // size of the hash function output in bits.
 // must be at most 16. good values range from 16 to 12.
-#define BARPH_HASH_SIZE 16
+#define LOH_HASH_SIZE 16
 // log2 of the number of values per key (0 -> 1 value per key, 1 -> 2, 2 -> 4, 3 -> 8, 4 -> 16, etc)
 // higher values are slower, but result in smaller files. good values range from 8 to 2 (8 at a hash size of 12, etc.)
-#define BARPH_HASHTABLE_KEY_SHL 4
+#define LOH_HASHTABLE_KEY_SHL 4
 // heuristic/fudge
-#define BARPH_LOOKBACK_BIAS -1
+#define LOH_LOOKBACK_BIAS -1
 
 // hashtable itself, with multiple cells for each key based on the SHL define
-uint64_t hashtable[(1<<BARPH_HASH_SIZE)<<BARPH_HASHTABLE_KEY_SHL];
+uint64_t hashtable[(1<<LOH_HASH_SIZE)<<LOH_HASHTABLE_KEY_SHL];
 // hashtable of current cursor for overwriting, from 0 to just under (1<<SHL)
-uint8_t hashtable_i[1<<BARPH_HASH_SIZE];
+uint8_t hashtable_i[1<<LOH_HASH_SIZE];
 
 // hashtable hashing constants
 #define BRAPH_HASH_A_MULT 0x4C35
@@ -151,12 +151,12 @@ void hashmap_insert(const uint8_t * bytes, uint64_t value)
     uint16_t a = (bytes[0] | (((uint16_t)bytes[1]) << 8)) * BRAPH_HASH_A_MULT;
     uint16_t b = ((bytes[2] | (((uint16_t)bytes[3]) << 8)) ^ BRAPH_HASH_B_MASK) * BRAPH_HASH_B_MULT;
     uint32_t key_i = ((uint32_t)(a ^ b));
-    key_i &= (1 << BARPH_HASH_SIZE) - 1;
-    uint32_t key = key_i << BARPH_HASHTABLE_KEY_SHL;
+    key_i &= (1 << LOH_HASH_SIZE) - 1;
+    uint32_t key = key_i << LOH_HASHTABLE_KEY_SHL;
     
     // otherwise just overwrite the value after the newest value
     hashtable[key + hashtable_i[key_i]] = value;
-    hashtable_i[key_i] = (hashtable_i[key_i] + 1) & ((1 << BARPH_HASHTABLE_KEY_SHL) - 1);
+    hashtable_i[key_i] = (hashtable_i[key_i] + 1) & ((1 << LOH_HASHTABLE_KEY_SHL) - 1);
 }
 // bytes must point to four characters and be inside of buffer
 uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer, const size_t buffer_len, uint64_t * min_len)
@@ -165,15 +165,15 @@ uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer, const size_t
     uint16_t a = (bytes[0] | (((uint16_t)bytes[1]) << 8)) * BRAPH_HASH_A_MULT;
     uint16_t b = ((bytes[2] | (((uint16_t)bytes[3]) << 8)) ^ BRAPH_HASH_B_MASK) * BRAPH_HASH_B_MULT;
     uint32_t key_i = ((uint32_t)(a ^ b));
-    key_i &= (1 << BARPH_HASH_SIZE) - 1;
-    uint32_t key = key_i << BARPH_HASHTABLE_KEY_SHL;
+    key_i &= (1 << LOH_HASH_SIZE) - 1;
+    uint32_t key = key_i << LOH_HASHTABLE_KEY_SHL;
     
     // look for match within key
     uint64_t best = -1;
     uint64_t best_len = min_lookback_length - 1;
-    for (int j = 0; j < (1 << BARPH_HASHTABLE_KEY_SHL); j++)
+    for (int j = 0; j < (1 << LOH_HASHTABLE_KEY_SHL); j++)
     {
-        int n = (hashtable_i[key_i] + (1 << BARPH_HASHTABLE_KEY_SHL) - 1 - j) & ((1 << BARPH_HASHTABLE_KEY_SHL) - 1);
+        int n = (hashtable_i[key_i] + (1 << LOH_HASHTABLE_KEY_SHL) - 1 - j) & ((1 << LOH_HASHTABLE_KEY_SHL) - 1);
         uint64_t value = hashtable[key + n];
         // the above is technically correct for how the keys are rotated, BUT:
         // uint64_t value = hashtable[key + j]; (which is technically wrong) works ALMOST as well.
@@ -232,7 +232,7 @@ uint64_t hashmap_get_efficient(const uint64_t i, const uint8_t * input, const si
             (dist <= 0x7FFFFF ? 4 : 5)));
         overhead += 1;
         
-        if (overhead + BARPH_LOOKBACK_BIAS < size + 1)
+        if (overhead + LOH_LOOKBACK_BIAS < size + 1)
         {
             *in_size = size;
             return found_loc;
@@ -482,7 +482,7 @@ typedef struct _huff_node {
 
 static huff_node_t * alloc_huff_node()
 {
-    return (huff_node_t *)BARPH_MALLOC(sizeof(huff_node_t));
+    return (huff_node_t *)LOH_MALLOC(sizeof(huff_node_t));
 }
 
 static void free_huff_nodes(huff_node_t * node)
@@ -491,7 +491,7 @@ static void free_huff_nodes(huff_node_t * node)
         free_huff_nodes(node->children[0]);
     if (node->children[1])
         free_huff_nodes(node->children[1]);
-    BARPH_FREE(node);
+    LOH_FREE(node);
 }
 
 static void push_code(huff_node_t * node, uint8_t bit)
@@ -697,9 +697,11 @@ static byte_buffer_t huff_unpack(bit_buffer_t * buf)
     return ret;
 }
 
+// LLH
+
 // passed-in data is modified, but not stored; it still belongs to the caller, and must be freed by the caller
-// returned data must be freed by the caller; it was allocated with BARPH_MALLOC
-static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_lookback, uint8_t do_huff, uint8_t do_diff, size_t * out_len)
+// returned data must be freed by the caller; it was allocated with LOH_MALLOC
+static uint8_t * loh_compress(uint8_t * data, size_t len, uint8_t do_lookback, uint8_t do_huff, uint8_t do_diff, size_t * out_len)
 {
     if (!data || !out_len) return 0;
     
@@ -720,21 +722,21 @@ static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_lookback,
     {
         byte_buffer_t new_buf = lookback_compress(buf.data, buf.len);
         if (buf.data != data)
-            BARPH_FREE(buf.data);
+            LOH_FREE(buf.data);
         buf = new_buf;
     }
     if (do_huff)
     {
         byte_buffer_t new_buf = huff_pack(buf.data, buf.len).buffer;
         if (buf.data != data)
-            BARPH_FREE(buf.data);
+            LOH_FREE(buf.data);
         buf = new_buf;
     }
     
     byte_buffer_t real_buf = {0, 0, 0};
     bytes_reserve(&real_buf, buf.len + 8 + 4);
     
-    bytes_push(&real_buf, (const uint8_t *)"bRPH\2", 5);
+    bytes_push(&real_buf, (const uint8_t *)"LOHz", 5);
     byte_push(&real_buf, do_diff);
     byte_push(&real_buf, do_lookback);
     byte_push(&real_buf, do_huff);
@@ -742,22 +744,22 @@ static uint8_t * barph_compress(uint8_t * data, size_t len, uint8_t do_lookback,
     bytes_push(&real_buf, buf.data, buf.len);
     
     if (buf.data != data)
-        BARPH_FREE(buf.data);
+        LOH_FREE(buf.data);
     
     *out_len = real_buf.len;
     return real_buf.data;
 }
 // passed-in data is modified, but not stored; it still belongs to the caller, and must be freed by the caller
-// returned data must be freed by the caller; it was allocated with BARPH_MALLOC
-static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
+// returned data must be freed by the caller; it was allocated with LOH_MALLOC
+static uint8_t * loh_decompress(uint8_t * data, size_t len, size_t * out_len)
 {
     if (!data || !out_len) return 0;
     
     byte_buffer_t buf = {data, len, len};
     
-    if (buf.len < 8 || memcmp(buf.data, "bRPH\2", 5) != 0)
+    if (buf.len < 8 || memcmp(buf.data, "LOHz", 5) != 0)
     {
-        puts("invalid barph file");
+        puts("invalid loh file");
         exit(0);
     }
     uint8_t do_diff = buf.data[5];
@@ -779,14 +781,14 @@ static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
         compressed.buffer = buf;
         byte_buffer_t new_buf = huff_unpack(&compressed);
         if (buf.data != data + 12)
-            BARPH_FREE(buf.data);
+            LOH_FREE(buf.data);
         buf = new_buf;
     }
     if (do_lookback)
     {
         byte_buffer_t new_buf = lookback_decompress(buf.data, buf.len);
         if (buf.data != data + 12)
-            BARPH_FREE(buf.data);
+            LOH_FREE(buf.data);
         buf = new_buf;
     }
     if (do_diff)
@@ -814,9 +816,9 @@ static uint8_t * barph_decompress(uint8_t * data, size_t len, size_t * out_len)
     else
     {
         if (buf.data != data)
-            BARPH_FREE(buf.data);
+            LOH_FREE(buf.data);
         return 0;
     }
 }
 
-#endif // BARPH_IMPL_HEADER
+#endif // LOH_IMPL_HEADER
