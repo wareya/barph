@@ -78,7 +78,7 @@ int main(int argc, char ** argv)
         }
         else
         {
-            fprintf(stderr, "error: checksum validation failed");
+            fprintf(stderr, "error: decompression failed");
             exit(-1);
         }
     }

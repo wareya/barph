@@ -1,27 +1,37 @@
-0xxx xxxx +u8
-unsized rle, u8 contains one literal repeated <xxx xxxx> times
+xxxx xx00 ...
+literals, ... contains <xxxx xx> literals
 
-10xx xxxx +u8 ...
-sized rle, ... contains <u8> literals repeated <xx xxxx> times
+xxxx xx10 u8 ...
+long literals, ... contains <u8 xxxx xx> literals
 
-110x xxxx u8 ...
-literals, ... contains <x xxxx u8> literals
 
-TODO:
+Lookback: one of the lookback distance signals, followed by a lookback length.
 
-1110 xxxx
-4-bit lookback
+Lookback distance signals:
 
-1111 0xxx +u8
-11-bit lookback
+xxxx xx01
+Lookback has a distance <xxxx xx>.
 
-1111 10xx +u16
-18-bit lookback
+xxxx x011 +u8
+13-bit lookback
+Lookback has a distance <u8 xxxx x>.
 
-1111 110x +u24
-18-bit lookback
+xxxx 0111 +u16
+20-bit lookback
+Lookback has a distance <u16 xxxx>. The u16 is least-significant-chunk-first.
 
-1111 1110 +u32
-32-bit lookback
+xxx0 1111 +u24
+20-bit lookback
+Etc.
 
-(lookback starts at 0)
+xx01 1111 +u32
+34-bit lookback
+
+Lookback lengths:
+
+xxxx xxx0
+Lookback has a length of <xxxx xxx>.
+
+xxxx xxx1 u8
+Lookback has a length of <u8 xxxx xxx>.
+
