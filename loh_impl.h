@@ -626,7 +626,7 @@ static uint32_t loh_checksum(uint8_t * data, size_t len)
     
     uint32_t partial_sum[stripes];
     for (size_t j = 0; j < stripes; j++)
-        partial_sum[j] = checksum;
+        partial_sum[j] = checksum + j;
     
     size_t checksum_i = 0;
     while (checksum_i + (stripes - 1) < len)
