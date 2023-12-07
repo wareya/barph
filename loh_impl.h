@@ -185,8 +185,13 @@ static inline uint32_t hashmap_hash(const uint8_t * bytes)
 {
     // hashing function (can be anything; go ahead and optimize it as long as it doesn't result in tons of collisions)
     uint32_t temp = 0xA68BF1D7;
-    for (size_t j = 0; j < LOH_HASH_LENGTH; j += 1)
-        temp = (temp + bytes[j]) * 0x4706DA51;
+    // unaligned-safe 32-bit load
+    uint32_t a = bytes[0];
+    a |= ((uint32_t)bytes[1]) << 8;
+    a |= ((uint32_t)bytes[2]) << 16;
+    a |= ((uint32_t)bytes[3]) << 24;
+    // then just multiply it by the const and fold down the top 16 bits
+    temp *= a;
     temp ^= temp >> 16;
     return temp & hash_mask;
 }
