@@ -234,11 +234,14 @@ static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer
             continue;
         
         // find longest match
-        // (this is significantly faster than testing byte-by-byte)
+        // testing in chunks is significantly faster than testing byte-by-byte
+        const uint64_t good_enough_length = 128;
+        const uint64_t axe_it_length = 64;
+        
         const uint64_t chunk_size = 16;
         uint64_t remaining = buffer_len - i;
-        if (remaining > 256) // good enough
-            remaining = 256;
+        if (remaining > good_enough_length)
+            remaining = good_enough_length;
         
         uint64_t size = 0;
         while (size + chunk_size < remaining)
@@ -253,14 +256,14 @@ static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer
         if (size > best_size || (size == best_size && value > best))
         {
             // previous best entry hit was expensive to test; axe it
-            if (best_size >= 64)
+            if (best_size >= axe_it_length)
                 hashtable[key + best_j] = 0;
             
             best_size = size;
             best = value;
             best_j = j;
             
-            if (best_size >= 256) // good enough
+            if (best_size >= good_enough_length)
                 break;
             if (!final && best_size >= 8)
                 break;
