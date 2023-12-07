@@ -1,6 +1,15 @@
 #ifndef LOH_IMPL_HEADER
 #define LOH_IMPL_HEADER
 
+/*
+    LOH (LOokahead + Huffman)
+    Single-header compression/decompression library.
+    Uses a bespoke format.
+    You probably want these functions:
+        loh_compress
+        loh_decompress
+*/
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -213,9 +222,9 @@ static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer
     uint32_t best_j = 0;
     for (uint32_t j = 0; j < hash_shl_max; j++)
     {
+        // cycle from newest to oldest
         const int n = (hashtable_i[key_i] + hash_shl_max - 1 - j) & hash_shl_mask;
         const uint64_t value = hashtable[key + n];
-        //const uint64_t value = hashtable[key + j];
         
         if (value >= i)
             break;
@@ -225,8 +234,12 @@ static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer
             continue;
         
         // find longest match
+        // (this is significantly faster than testing byte-by-byte)
         const uint64_t chunk_size = 16;
-        const uint64_t remaining = buffer_len - i;
+        uint64_t remaining = buffer_len - i;
+        if (remaining > 256) // good enough
+            remaining = 256;
+        
         uint64_t size = 0;
         while (size + chunk_size < remaining)
         {
@@ -239,7 +252,7 @@ static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer
         
         if (size > best_size || (size == best_size && value > best))
         {
-            // other entry hit was expensive to test; axe it
+            // previous best entry hit was expensive to test; axe it
             if (best_size >= 64)
                 hashtable[key + best_j] = 0;
             
@@ -274,9 +287,11 @@ static inline uint64_t hashmap_get_if_efficient(const uint64_t i, const uint8_t 
     const uint64_t dist = i - found_loc;
     if (found_loc != (uint64_t)-1 && found_loc < i && dist <= 0x3FFFFFFFF)
     {
+        // find true length of match match
+        // (this is significantly faster than testing byte-by-byte)
         if (final)
         {
-            const uint64_t chunk_size = 1;
+            const uint64_t chunk_size = 16;
             while (size + chunk_size < remaining)
             {
                 if (memcmp(&input[i + size], &input[found_loc + size], chunk_size) == 0)
