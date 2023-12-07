@@ -18,13 +18,15 @@
 #define LOH_FREE free
 #endif
 
+/* data structures */
+
 typedef struct {
     uint8_t * data;
     size_t len;
     size_t cap;
-} byte_buffer_t;
+} loh_byte_buffer;
 
-static inline void bytes_reserve(byte_buffer_t * buf, size_t extra)
+static inline void bytes_reserve(loh_byte_buffer * buf, size_t extra)
 {
     if (buf->cap < 8)
         buf->cap = 8;
@@ -32,13 +34,13 @@ static inline void bytes_reserve(byte_buffer_t * buf, size_t extra)
         buf->cap <<= 1;
     buf->data = (uint8_t *)LOH_REALLOC(buf->data, buf->cap);
 }
-static inline void bytes_push(byte_buffer_t * buf, const uint8_t * bytes, size_t count)
+static inline void bytes_push(loh_byte_buffer * buf, const uint8_t * bytes, size_t count)
 {
     bytes_reserve(buf, count);
     memcpy(&buf->data[buf->len], bytes, count);
     buf->len += count;
 }
-static inline void byte_push(byte_buffer_t * buf, uint8_t byte)
+static inline void byte_push(loh_byte_buffer * buf, uint8_t byte)
 {
     if (buf->len == buf->cap)
     {
@@ -52,13 +54,13 @@ static inline void byte_push(byte_buffer_t * buf, uint8_t byte)
 }
 
 typedef struct {
-    byte_buffer_t buffer;
+    loh_byte_buffer buffer;
     size_t byte_index;
     size_t bit_count;
     uint8_t bit_index;
-} bit_buffer_t;
+} loh_bit_buffer;
 
-static inline void bits_push(bit_buffer_t * buf, uint64_t data, uint8_t bits)
+static inline void bits_push(loh_bit_buffer * buf, uint64_t data, uint8_t bits)
 {
     if (bits == 0)
         return;
@@ -103,7 +105,7 @@ static inline void bits_push(bit_buffer_t * buf, uint64_t data, uint8_t bits)
         return;
     }
 }
-static inline void bit_push(bit_buffer_t * buf, uint8_t data)
+static inline void bit_push(loh_bit_buffer * buf, uint8_t data)
 {
     if (buf->bit_index >= 8 || buf->buffer.len == 0)
     {
@@ -118,7 +120,7 @@ static inline void bit_push(bit_buffer_t * buf, uint8_t data)
     buf->bit_index += 1;
     buf->bit_count += 1;
 }
-static inline uint64_t bits_pop(bit_buffer_t * buf, uint8_t bits)
+static inline uint64_t bits_pop(loh_bit_buffer * buf, uint8_t bits)
 {
     if (bits == 0)
         return 0;
@@ -135,7 +137,7 @@ static inline uint64_t bits_pop(bit_buffer_t * buf, uint8_t bits)
     }
     return ret;
 }
-static inline uint8_t bit_pop(bit_buffer_t * buf)
+static inline uint8_t bit_pop(loh_bit_buffer * buf)
 {
     if (buf->bit_index >= 8)
     {
@@ -147,6 +149,8 @@ static inline uint8_t bit_pop(bit_buffer_t * buf)
     
     return ret;
 }
+
+/* compression */
 
 static const size_t min_lookback_length = 1;
 
@@ -304,12 +308,12 @@ static inline uint64_t hashmap_get_if_efficient(const uint64_t i, const uint8_t 
     return -1;
 }
 
-static byte_buffer_t lookback_compress(const uint8_t * input, uint64_t input_len)
+static loh_byte_buffer lookback_compress(const uint8_t * input, uint64_t input_len)
 {
     memset(&hashtable, 0, sizeof(hashtable));
     memset(&hashtable_i, 0, sizeof(hashtable_i));
     
-    byte_buffer_t ret = {0, 0, 0};
+    loh_byte_buffer ret = {0, 0, 0};
     
     byte_push(&ret, input_len & 0xFF);
     byte_push(&ret, (input_len >> 8) & 0xFF);
@@ -435,13 +439,253 @@ static byte_buffer_t lookback_compress(const uint8_t * input, uint64_t input_len
     return ret;
 }
 
-// On error, the output byte_buffer_t's cap will be 0 *AND* its len will be greater than 0.
+typedef struct _huff_node {
+    struct _huff_node * children[2];
+    int64_t freq;
+    // a huffman code for a symbol from a string of length N will never exceed log2(N) in length
+    // (e.g. for a 65kbyte file, it's impossible for there to both be enough unique symbols AND
+    //  an unbalanced-enough symbol distribution that the huffman tree is more than 16 levels deep)
+    // e.g. for a token to require 16 bits to code, it needs to occur have a freq around 1/65k...
+    // ... which can only happen if the surrounding data is at least 65k long! and log2(65k) == 16.
+    // ((I haven't proven this to myself, but if it's wrong, it's only wrong by 1 bit))
+    // so, storing codes from a 64-bit-address-space file in a 64-bit number is fine
+    // (or, if I'm wrong, from a 63-bit-address-space file)
+    uint64_t code;
+    uint8_t code_len;
+    uint8_t symbol;
+} huff_node_t;
+
+static huff_node_t * alloc_huff_node()
+{
+    return (huff_node_t *)LOH_MALLOC(sizeof(huff_node_t));
+}
+
+static void free_huff_nodes(huff_node_t * node)
+{
+    if (node->children[0])
+        free_huff_nodes(node->children[0]);
+    if (node->children[1])
+        free_huff_nodes(node->children[1]);
+    LOH_FREE(node);
+}
+
+static void push_code(huff_node_t * node, uint8_t bit)
+{
+    //node->code |= (bit & 1) << node->code_len;
+    node->code <<= 1;
+    node->code |= bit & 1;
+    node->code_len += 1;
+    
+    if (node->children[0])
+        push_code(node->children[0], bit);
+    if (node->children[1])
+        push_code(node->children[1], bit);
+}
+
+static int count_compare(const void * a, const void * b)
+{
+    int64_t n = *((int64_t*)b) - *((int64_t*)a);
+    return n > 0 ? 1 : n < 0 ? -1 : 0;
+}
+
+static void push_huff_node(loh_bit_buffer * buf, huff_node_t * node, uint64_t depth)
+{
+    if (node->children[0] && node->children[1])
+    {
+        bit_push(buf, 1);
+        push_huff_node(buf, node->children[0], depth + 1);
+        push_huff_node(buf, node->children[1], depth + 1);
+    }
+    else
+    {
+        bit_push(buf, 0);
+        bits_push(buf, node->symbol, 8);
+    }
+}
+
+static loh_bit_buffer huff_pack(uint8_t * data, size_t len)
+{
+    // build huff dictionary
+    
+    // count bytes, then sort them
+    // we stuff the byte identity into the bottom 8 bits
+    uint64_t counts[256] = {0};
+    for (size_t i = 0; i < len; i += 1)
+        counts[data[i]] += 256;
+    for (size_t b = 0; b < 256; b++)
+        counts[b] |= b;
+    qsort(&counts, 256, sizeof(uint64_t), count_compare);
+    
+    // set up raw huff nodes
+    huff_node_t * unordered_dict[256];
+    for (size_t i = 0; i < 256; i += 1)
+    {
+        unordered_dict[i] = alloc_huff_node();
+        unordered_dict[i]->symbol = counts[i] & 0xFF;
+        unordered_dict[i]->code = 0;
+        unordered_dict[i]->code_len = 0;
+        unordered_dict[i]->freq = counts[i] >> 8;
+        unordered_dict[i]->children[0] = 0;
+        unordered_dict[i]->children[1] = 0;
+    }
+    
+    // set up byte name -> huff node dict
+    huff_node_t * dict[256];
+    for (size_t i = 0; i < 256; i += 1)
+        dict[unordered_dict[i]->symbol] = unordered_dict[i];
+    
+    // set up tree generation queues
+    huff_node_t * queue[512];
+    memset(queue, 0, sizeof(queue));
+    
+    size_t queue_count = 256;
+    
+    for (size_t i = 0; i < 256; i += 1)
+        queue[i] = unordered_dict[i];
+    
+    // remove zero-frequency items from the input queue
+    while (queue[queue_count - 1]->freq == 0 && queue_count > 0)
+    {
+        free_huff_nodes(queue[queue_count - 1]);
+        queue_count -= 1;
+    }
+    
+    // start pumping through the queues
+    while (queue_count > 1)
+    {
+        huff_node_t * lowest = queue[queue_count - 1];
+        huff_node_t * next_lowest = queue[queue_count - 2];
+        
+        queue_count -= 2;
+        
+        if (!lowest || !next_lowest)
+        {
+            fprintf(stderr, "LOH internal error: failed to find lowest-frequency nodes\n");
+            exit(-1);
+        }
+        
+        // make new node
+        huff_node_t * new_node = alloc_huff_node();
+        new_node->symbol = 0;
+        new_node->code = 0;
+        new_node->code_len = 0;
+        new_node->freq = lowest->freq + next_lowest->freq;
+        new_node->children[0] = lowest;
+        new_node->children[1] = next_lowest;
+        
+        push_code(new_node->children[0], 0);
+        push_code(new_node->children[1], 1);
+        
+        // insert new element at end of array, then bubble it down to the correct place
+        queue[queue_count] = new_node;
+        queue_count += 1;
+        if (queue_count > 512)
+        {
+            fprintf(stderr, "LOH internal error: huffman tree generation too deep\n");
+            exit(-1);
+        }
+        for (size_t i = queue_count - 1; i > 0; i -= 1)
+        {
+            if (queue[i]->freq >= queue[i-1]->freq)
+            {
+                huff_node_t * temp = queue[i];
+                queue[i] = queue[i-1];
+                queue[i-1] = temp;
+            }
+        }
+    }
+    
+    // set up buffers and start pushing data to them
+    
+    loh_bit_buffer ret;
+    memset(&ret, 0, sizeof(loh_bit_buffer));
+    
+    bits_push(&ret, len, 8*8);
+    
+    push_huff_node(&ret, queue[0], 0);
+    
+    // the bit buffer is forcibly aligned to the start of the next byte at the end of the huff tree
+    ret.bit_index = 8;
+    
+    for (size_t i = 0; i < len; i++)
+    {
+        uint8_t c = data[i];
+        bits_push(&ret, dict[c]->code, dict[c]->code_len);
+    }
+    
+    free_huff_nodes(queue[0]);
+    
+    return ret;
+}
+
+// passed-in data is modified, but not stored; it still belongs to the caller, and must be freed by the caller
+// returned data must be freed by the caller; it was allocated with LOH_MALLOC
+static uint8_t * loh_compress(uint8_t * data, size_t len, uint8_t do_lookback, uint8_t do_huff, uint8_t do_diff, size_t * out_len)
+{
+    if (!data || !out_len) return 0;
+    
+    loh_byte_buffer buf = {data, len, len};
+    
+    const uint32_t big_prime = 0x1011B0D5;
+    uint32_t checksum = 0x87654321;
+    
+    size_t i = 0;
+    while (i + 3 < buf.len)
+    {
+        checksum = (checksum + buf.data[i++]) * big_prime;
+        checksum = (checksum + buf.data[i++]) * big_prime;
+        checksum = (checksum + buf.data[i++]) * big_prime;
+        checksum = (checksum + buf.data[i++]) * big_prime;
+    }
+    while (i < buf.len)
+        checksum = (checksum + buf.data[i++]) * big_prime;
+    
+    if (do_diff)
+    {
+        for (size_t i = buf.len - 1; i >= do_diff; i -= 1)
+            buf.data[i] -= buf.data[i - do_diff];
+    }
+    if (do_lookback)
+    {
+        loh_byte_buffer new_buf = lookback_compress(buf.data, buf.len);
+        if (buf.data != data)
+            LOH_FREE(buf.data);
+        buf = new_buf;
+    }
+    if (do_huff)
+    {
+        loh_byte_buffer new_buf = huff_pack(buf.data, buf.len).buffer;
+        if (buf.data != data)
+            LOH_FREE(buf.data);
+        buf = new_buf;
+    }
+    
+    loh_byte_buffer real_buf = {0, 0, 0};
+    bytes_reserve(&real_buf, buf.len + 8 + 4);
+    
+    bytes_push(&real_buf, (const uint8_t *)"LOHz", 5);
+    byte_push(&real_buf, do_diff);
+    byte_push(&real_buf, do_lookback);
+    byte_push(&real_buf, do_huff);
+    bytes_push(&real_buf, (uint8_t *)&checksum, 4);
+    bytes_push(&real_buf, buf.data, buf.len);
+    
+    if (buf.data != data)
+        LOH_FREE(buf.data);
+    
+    *out_len = real_buf.len;
+    return real_buf.data;
+}
+
+/* decompression */
+
+// On error, the output loh_byte_buffer's cap will be 0 *AND* its len will be greater than 0.
 // Any partially-decompressed data is returned rather than being freed and nulled.
-static byte_buffer_t lookback_decompress(const uint8_t * input, size_t input_len)
+static loh_byte_buffer lookback_decompress(const uint8_t * input, size_t input_len)
 {
     size_t i = 0;
     
-    byte_buffer_t ret = {0, 0, 0};
+    loh_byte_buffer ret = {0, 0, 0};
     
     if (input_len < 8)
     {
@@ -561,233 +805,59 @@ static byte_buffer_t lookback_decompress(const uint8_t * input, size_t input_len
     return ret;
 }
 
-typedef struct _huff_node {
-    struct _huff_node * children[2];
-    int64_t freq;
-    // a huffman code for a symbol from a string of length N will never exceed log2(N) in length
-    // (e.g. for a 65kbyte file, it's impossible for there to both be enough unique symbols AND
-    //  an unbalanced-enough symbol distribution that the huffman tree is more than 16 levels deep)
-    // e.g. for a token to require 16 bits to code, it needs to occur have a freq around 1/65k...
-    // ... which can only happen if the surrounding data is at least 65k long! and log2(65k) == 16.
-    // ((I haven't proven this to myself, but if it's wrong, it's only wrong by 1 bit))
-    // so, storing codes from a 64-bit-address-space file in a 64-bit number is fine
-    // (or, if I'm wrong, from a 63-bit-address-space file)
-    uint64_t code;
-    uint8_t code_len;
-    uint8_t symbol;
-} huff_node_t;
-
-static huff_node_t * alloc_huff_node()
+static uint8_t pop_huff_node(uint16_t * base_buffer, size_t max_len, loh_bit_buffer * buf, size_t start, size_t * consumed_len)
 {
-    return (huff_node_t *)LOH_MALLOC(sizeof(huff_node_t));
-}
-
-static void free_huff_nodes(huff_node_t * node)
-{
-    if (node->children[0])
-        free_huff_nodes(node->children[0]);
-    if (node->children[1])
-        free_huff_nodes(node->children[1]);
-    LOH_FREE(node);
-}
-
-static void push_code(huff_node_t * node, uint8_t bit)
-{
-    //node->code |= (bit & 1) << node->code_len;
-    node->code <<= 1;
-    node->code |= bit & 1;
-    node->code_len += 1;
-    
-    if (node->children[0])
-        push_code(node->children[0], bit);
-    if (node->children[1])
-        push_code(node->children[1], bit);
-}
-
-static int count_compare(const void * a, const void * b)
-{
-    int64_t n = *((int64_t*)b) - *((int64_t*)a);
-    return n > 0 ? 1 : n < 0 ? -1 : 0;
-}
-
-static void push_huff_node(bit_buffer_t * buf, huff_node_t * node, uint64_t depth)
-{
-    if (node->children[0] && node->children[1])
-    {
-        bit_push(buf, 1);
-        push_huff_node(buf, node->children[0], depth + 1);
-        push_huff_node(buf, node->children[1], depth + 1);
-    }
-    else
-    {
-        bit_push(buf, 0);
-        bits_push(buf, node->symbol, 8);
-    }
-}
-
-static bit_buffer_t huff_pack(uint8_t * data, size_t len)
-{
-    // build huff dictionary
-    
-    // count bytes, then sort them
-    // we stuff the byte identity into the bottom 8 bits
-    uint64_t counts[256] = {0};
-    for (size_t i = 0; i < len; i += 1)
-        counts[data[i]] += 256;
-    for (size_t b = 0; b < 256; b++)
-        counts[b] |= b;
-    qsort(&counts, 256, sizeof(uint64_t), count_compare);
-    
-    // set up raw huff nodes
-    huff_node_t * unordered_dict[256];
-    for (size_t i = 0; i < 256; i += 1)
-    {
-        unordered_dict[i] = alloc_huff_node();
-        unordered_dict[i]->symbol = counts[i] & 0xFF;
-        unordered_dict[i]->code = 0;
-        unordered_dict[i]->code_len = 0;
-        unordered_dict[i]->freq = counts[i] >> 8;
-        unordered_dict[i]->children[0] = 0;
-        unordered_dict[i]->children[1] = 0;
-    }
-    
-    // set up byte name -> huff node dict
-    huff_node_t * dict[256];
-    for (size_t i = 0; i < 256; i += 1)
-        dict[unordered_dict[i]->symbol] = unordered_dict[i];
-    
-    // set up tree generation queues
-    huff_node_t * queue[512];
-    memset(queue, 0, sizeof(queue));
-    
-    size_t queue_count = 256;
-    
-    for (size_t i = 0; i < 256; i += 1)
-        queue[i] = unordered_dict[i];
-    
-    // remove zero-frequency items from the input queue
-    while (queue[queue_count - 1]->freq == 0 && queue_count > 0)
-    {
-        free_huff_nodes(queue[queue_count - 1]);
-        queue_count -= 1;
-    }
-    
-    // start pumping through the queues
-    while (queue_count > 1)
-    {
-        huff_node_t * lowest = queue[queue_count - 1];
-        huff_node_t * next_lowest = queue[queue_count - 2];
-        
-        queue_count -= 2;
-        
-        if (!lowest || !next_lowest)
-        {
-            fprintf(stderr, "LOH internal error: failed to find lowest-frequency nodes\n");
-            exit(-1);
-        }
-        
-        // make new node
-        huff_node_t * new_node = alloc_huff_node();
-        new_node->symbol = 0;
-        new_node->code = 0;
-        new_node->code_len = 0;
-        new_node->freq = lowest->freq + next_lowest->freq;
-        new_node->children[0] = lowest;
-        new_node->children[1] = next_lowest;
-        
-        push_code(new_node->children[0], 0);
-        push_code(new_node->children[1], 1);
-        
-        // insert new element at end of array, then bubble it down to the correct place
-        queue[queue_count] = new_node;
-        queue_count += 1;
-        if (queue_count > 512)
-        {
-            fprintf(stderr, "LOH internal error: huffman tree generation too deep\n");
-            exit(-1);
-        }
-        for (size_t i = queue_count - 1; i > 0; i -= 1)
-        {
-            if (queue[i]->freq >= queue[i-1]->freq)
-            {
-                huff_node_t * temp = queue[i];
-                queue[i] = queue[i-1];
-                queue[i-1] = temp;
-            }
-        }
-    }
-    
-    // set up buffers and start pushing data to them
-    
-    bit_buffer_t ret;
-    memset(&ret, 0, sizeof(bit_buffer_t));
-    
-    bits_push(&ret, len, 8*8);
-    
-    push_huff_node(&ret, queue[0], 0);
-    
-    // the bit buffer is forcibly aligned to the start of the next byte at the end of the huff tree
-    ret.bit_index = 8;
-    
-    for (size_t i = 0; i < len; i++)
-    {
-        uint8_t c = data[i];
-        bits_push(&ret, dict[c]->code, dict[c]->code_len);
-    }
-    
-    free_huff_nodes(queue[0]);
-    
-    return ret;
-}
-
-static uint8_t pop_huff_node(uint16_t * base_buffer, bit_buffer_t * buf, size_t start, size_t * consumed_len)
-{
-    if (start + 2 >= 1536)
+    if (start + 2 >= max_len)
         return 1;
     
     base_buffer[start    ] = 0;
     base_buffer[start + 1] = 0;
-    base_buffer[start + 2] = 0;
     
     int children = bit_pop(buf);
     if (children)
     {
         size_t left_size = 0;
-        if (pop_huff_node(base_buffer, buf, start + 3, &left_size))
+        if (pop_huff_node(base_buffer, max_len, buf, start + 2, &left_size))
             return 1;
         
         size_t right_size = 0;
-        if (pop_huff_node(base_buffer, buf, start + 3 + left_size, &right_size))
+        if (pop_huff_node(base_buffer, max_len, buf, start + 2 + left_size, &right_size))
             return 1;
         
-        base_buffer[start    ] = 3;
-        base_buffer[start + 1] = 3 + left_size;
+        base_buffer[start    ] = 2;
+        base_buffer[start + 1] = 2 + left_size;
         
-        *consumed_len = 3 + left_size + right_size;
+        *consumed_len = 2 + left_size + right_size;
     }
     else
     {
-        base_buffer[start + 2] = bits_pop(buf, 8);
-        *consumed_len = 3;
+        base_buffer[start    ] = 0;
+        base_buffer[start + 1] = bits_pop(buf, 8);
+        *consumed_len = 2;
     }
     
     return 0;
 }
 
-static byte_buffer_t huff_unpack(bit_buffer_t * buf)
+static loh_byte_buffer huff_unpack(loh_bit_buffer * buf)
 {
     buf->bit_index = 0;
     buf->byte_index = 0;
     size_t output_len = bits_pop(buf, 8*8);
     
-    byte_buffer_t ret = {0, 0, 0};
+    loh_byte_buffer ret = {0, 0, 0};
     
+    // Load huffman tree data as a flat jump buffer.
+    // Each node has two array cells.
+    // If a given node is a parent, its first cell will be the relative offset to its left branch node
+    // and its second cell will be the same to its right.
+    // If a given node is not a parent, then its first cell will be 0, and its second cell will be the symbol.
     size_t _size_unused;
-    uint16_t root[1536];
-    if (pop_huff_node(root, buf, 0, &_size_unused))
+    uint16_t root[1024];
+    if (pop_huff_node(root, 1024, buf, 0, &_size_unused))
         return ret;
     
-    // the bit buffer is forcibly aligned to the start of the next byte at the end of the huff tree
+    // the bit buffer is forcibly aligned to the start of the next byte at the end of the huffman tree data
     buf->bit_index = 0;
     buf->byte_index += 1;
     
@@ -800,17 +870,21 @@ static byte_buffer_t huff_unpack(bit_buffer_t * buf)
     uint16_t * node = root;
     for (size_t j = buf->byte_index; j < in_data_len; j++)
     {
+        // loop over bits in each byte and walk the huffman tree accordingly
         uint8_t byte = in_data[j];
         for (uint8_t b = 0; b < 8; b += 1)
         {
+            // left or right branch (node will always be a valid parent before reading this bit)
             uint8_t bit = byte & 1;
             node += node[bit];
             byte >>= 1;
             
+            // if this is a leaf note, output a byte and start over
             if (!node[0])
             {
-                ret.data[i] = node[2];
+                ret.data[i] = node[1];
                 i += 1;
+                // if we just output the last byte, we're done here
                 if (i >= output_len)
                     goto out;
                 node = root;
@@ -823,65 +897,14 @@ static byte_buffer_t huff_unpack(bit_buffer_t * buf)
     return ret;
 }
 
-// LLH
 
 // passed-in data is modified, but not stored; it still belongs to the caller, and must be freed by the caller
 // returned data must be freed by the caller; it was allocated with LOH_MALLOC
-static uint8_t * loh_compress(uint8_t * data, size_t len, uint8_t do_lookback, uint8_t do_huff, uint8_t do_diff, size_t * out_len)
+static uint8_t * loh_decompress(uint8_t * data, size_t len, size_t * out_len, uint8_t check_checksum)
 {
     if (!data || !out_len) return 0;
     
-    byte_buffer_t buf = {data, len, len};
-    
-    const uint32_t big_prime = 0x1011B0D5;
-    uint32_t checksum = 0x87654321;
-    
-    for (size_t i = 0; i < len; i += 1)
-        checksum = (checksum + buf.data[i]) * big_prime;
-    
-    if (do_diff)
-    {
-        for (size_t i = buf.len - 1; i >= do_diff; i -= 1)
-            buf.data[i] -= buf.data[i - do_diff];
-    }
-    if (do_lookback)
-    {
-        byte_buffer_t new_buf = lookback_compress(buf.data, buf.len);
-        if (buf.data != data)
-            LOH_FREE(buf.data);
-        buf = new_buf;
-    }
-    if (do_huff)
-    {
-        byte_buffer_t new_buf = huff_pack(buf.data, buf.len).buffer;
-        if (buf.data != data)
-            LOH_FREE(buf.data);
-        buf = new_buf;
-    }
-    
-    byte_buffer_t real_buf = {0, 0, 0};
-    bytes_reserve(&real_buf, buf.len + 8 + 4);
-    
-    bytes_push(&real_buf, (const uint8_t *)"LOHz", 5);
-    byte_push(&real_buf, do_diff);
-    byte_push(&real_buf, do_lookback);
-    byte_push(&real_buf, do_huff);
-    bytes_push(&real_buf, (uint8_t *)&checksum, 4);
-    bytes_push(&real_buf, buf.data, buf.len);
-    
-    if (buf.data != data)
-        LOH_FREE(buf.data);
-    
-    *out_len = real_buf.len;
-    return real_buf.data;
-}
-// passed-in data is modified, but not stored; it still belongs to the caller, and must be freed by the caller
-// returned data must be freed by the caller; it was allocated with LOH_MALLOC
-static uint8_t * loh_decompress(uint8_t * data, size_t len, size_t * out_len)
-{
-    if (!data || !out_len) return 0;
-    
-    byte_buffer_t buf = {data, len, len};
+    loh_byte_buffer buf = {data, len, len};
     
     if (buf.len < 8 || memcmp(buf.data, "LOHz", 5) != 0)
         return 0;
@@ -902,17 +925,17 @@ static uint8_t * loh_decompress(uint8_t * data, size_t len, size_t * out_len)
     
     if (do_huff)
     {
-        bit_buffer_t compressed;
-        memset(&compressed, 0, sizeof(bit_buffer_t));
+        loh_bit_buffer compressed;
+        memset(&compressed, 0, sizeof(loh_bit_buffer));
         compressed.buffer = buf;
-        byte_buffer_t new_buf = huff_unpack(&compressed);
+        loh_byte_buffer new_buf = huff_unpack(&compressed);
         if (buf.data != data + header_size)
             LOH_FREE(buf.data);
         buf = new_buf;
     }
     if (do_lookback)
     {
-        byte_buffer_t new_buf = lookback_decompress(buf.data, buf.len);
+        loh_byte_buffer new_buf = lookback_decompress(buf.data, buf.len);
         if (buf.data != data + header_size)
             LOH_FREE(buf.data);
         buf = new_buf;
@@ -932,15 +955,23 @@ static uint8_t * loh_decompress(uint8_t * data, size_t len, size_t * out_len)
     const uint32_t big_prime = 0x1011B0D5;
     uint32_t checksum = 0x87654321;
     
-    if (stored_checksum != 0)
+    if (stored_checksum != 0 && check_checksum)
     {
-        for (size_t i = 0; i < buf.len; i += 1)
-            checksum = (checksum + buf.data[i]) * big_prime;
+        size_t i = 0;
+        while (i + 3 < buf.len)
+        {
+            checksum = (checksum + buf.data[i++]) * big_prime;
+            checksum = (checksum + buf.data[i++]) * big_prime;
+            checksum = (checksum + buf.data[i++]) * big_prime;
+            checksum = (checksum + buf.data[i++]) * big_prime;
+        }
+        while (i < buf.len)
+            checksum = (checksum + buf.data[i++]) * big_prime;
     }
     else
         checksum = stored_checksum;
     
-    if (checksum == stored_checksum)
+    if (checksum == stored_checksum || !check_checksum)
     {
         *out_len = buf.len;
         return buf.data;

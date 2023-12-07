@@ -41,7 +41,7 @@ int main(int argc, char ** argv)
     
     uint8_t * raw_data = (uint8_t *)malloc(file_len);
     fread(raw_data, file_len, 1, f);
-    byte_buffer_t buf = {raw_data, file_len, file_len};
+    loh_byte_buffer buf = {raw_data, file_len, file_len};
     
     fclose(f);
     
@@ -68,7 +68,7 @@ int main(int argc, char ** argv)
     }
     else if (argv[1][0] == 'x')
     {
-        buf.data = loh_decompress(buf.data, buf.len, &buf.len);
+        buf.data = loh_decompress(buf.data, buf.len, &buf.len, 1);
         
         if (buf.data)
         {
