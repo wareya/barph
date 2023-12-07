@@ -618,27 +618,43 @@ static loh_bit_buffer huff_pack(uint8_t * data, size_t len)
     return ret;
 }
 
+static uint32_t loh_checksum(uint8_t * data, size_t len)
+{
+    const uint32_t stripes = 4;
+    const uint32_t big_prime = 0x1011B0D5;
+    uint32_t checksum = 0x87654321;
+    
+    uint32_t partial_sum[stripes];
+    for (size_t j = 0; j < stripes; j++)
+        partial_sum[j] = checksum;
+    
+    size_t checksum_i = 0;
+    while (checksum_i + (stripes - 1) < len)
+    {
+        for (size_t j = 0; j < stripes; j++)
+            partial_sum[j] = (partial_sum[j] + data[checksum_i++]) * big_prime;
+    }
+    
+    for (size_t j = 0; j < stripes; j++)
+        checksum = (checksum + partial_sum[j]) * big_prime;
+    
+    while (checksum_i < len)
+        checksum = (checksum + data[checksum_i++]) * big_prime;
+    
+    checksum += len;
+    
+    return checksum;
+}
+
 // passed-in data is modified, but not stored; it still belongs to the caller, and must be freed by the caller
 // returned data must be freed by the caller; it was allocated with LOH_MALLOC
 static uint8_t * loh_compress(uint8_t * data, size_t len, uint8_t do_lookback, uint8_t do_huff, uint8_t do_diff, size_t * out_len)
 {
     if (!data || !out_len) return 0;
     
+    uint32_t checksum = loh_checksum(data, len);
+    
     loh_byte_buffer buf = {data, len, len};
-    
-    const uint32_t big_prime = 0x1011B0D5;
-    uint32_t checksum = 0x87654321;
-    
-    size_t i = 0;
-    while (i + 3 < buf.len)
-    {
-        checksum = (checksum + buf.data[i++]) * big_prime;
-        checksum = (checksum + buf.data[i++]) * big_prime;
-        checksum = (checksum + buf.data[i++]) * big_prime;
-        checksum = (checksum + buf.data[i++]) * big_prime;
-    }
-    while (i < buf.len)
-        checksum = (checksum + buf.data[i++]) * big_prime;
     
     if (do_diff)
     {
@@ -952,22 +968,9 @@ static uint8_t * loh_decompress(uint8_t * data, size_t len, size_t * out_len, ui
             buf.data[i] += buf.data[i - do_diff];
     }
     
-    const uint32_t big_prime = 0x1011B0D5;
-    uint32_t checksum = 0x87654321;
-    
+    uint32_t checksum;
     if (stored_checksum != 0 && check_checksum)
-    {
-        size_t i = 0;
-        while (i + 3 < buf.len)
-        {
-            checksum = (checksum + buf.data[i++]) * big_prime;
-            checksum = (checksum + buf.data[i++]) * big_prime;
-            checksum = (checksum + buf.data[i++]) * big_prime;
-            checksum = (checksum + buf.data[i++]) * big_prime;
-        }
-        while (i < buf.len)
-            checksum = (checksum + buf.data[i++]) * big_prime;
-    }
+        checksum = loh_checksum(buf.data, buf.len);
     else
         checksum = stored_checksum;
     
