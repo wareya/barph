@@ -625,45 +625,6 @@ static void push_huff_node(bit_buffer_t * buf, huff_node_t * node, uint64_t dept
     }
 }
 
-uint16_t _popped_huff_nodes[1536];
-static uint16_t * pop_huff_node(bit_buffer_t * buf, size_t start, size_t * consumed_len)
-{
-    if (start + 2 >= 1536)
-        return 0;
-    
-    _popped_huff_nodes[start    ] = 0;
-    _popped_huff_nodes[start + 1] = 0;
-    _popped_huff_nodes[start + 2] = 0;
-    
-    int children = bit_pop(buf);
-    if (children)
-    {
-        size_t left_size = 0;
-        uint16_t * left = pop_huff_node(buf, start + 3, &left_size);
-        left = left;
-        if (left_size == 0)
-            return 0;
-        
-        size_t right_size = 0;
-        uint16_t * right = pop_huff_node(buf, start + 3 + left_size, &right_size);
-        right = right;
-        if (right_size == 0)
-            return 0;
-        
-        _popped_huff_nodes[start    ] = 3;
-        _popped_huff_nodes[start + 1] = 3 + left_size;
-        
-        *consumed_len = 3 + left_size + right_size;
-    }
-    else
-    {
-        _popped_huff_nodes[start + 2] = bits_pop(buf, 8);
-        *consumed_len = 3;
-    }
-    
-    return &_popped_huff_nodes[start];
-}
-
 static bit_buffer_t huff_pack(uint8_t * data, size_t len)
 {
     // build huff dictionary
@@ -779,20 +740,57 @@ static bit_buffer_t huff_pack(uint8_t * data, size_t len)
     return ret;
 }
 
+static uint8_t pop_huff_node(uint16_t * base_buffer, bit_buffer_t * buf, size_t start, size_t * consumed_len)
+{
+    if (start + 2 >= 1536)
+        return 1;
+    
+    base_buffer[start    ] = 0;
+    base_buffer[start + 1] = 0;
+    base_buffer[start + 2] = 0;
+    
+    int children = bit_pop(buf);
+    if (children)
+    {
+        size_t left_size = 0;
+        if (pop_huff_node(base_buffer, buf, start + 3, &left_size))
+            return 1;
+        
+        size_t right_size = 0;
+        if (pop_huff_node(base_buffer, buf, start + 3 + left_size, &right_size))
+            return 1;
+        
+        base_buffer[start    ] = 3;
+        base_buffer[start + 1] = 3 + left_size;
+        
+        *consumed_len = 3 + left_size + right_size;
+    }
+    else
+    {
+        base_buffer[start + 2] = bits_pop(buf, 8);
+        *consumed_len = 3;
+    }
+    
+    return 0;
+}
+
 static byte_buffer_t huff_unpack(bit_buffer_t * buf)
 {
     buf->bit_index = 0;
     buf->byte_index = 0;
     size_t output_len = bits_pop(buf, 8*8);
     
+    byte_buffer_t ret = {0, 0, 0};
+    
     size_t _size_unused;
-    uint16_t * root = pop_huff_node(buf, 0, &_size_unused);
+    uint16_t root[1536];
+    if (pop_huff_node(root, buf, 0, &_size_unused))
+        return ret;
     
     // the bit buffer is forcibly aligned to the start of the next byte at the end of the huff tree
     buf->bit_index = 0;
     buf->byte_index += 1;
     
-    byte_buffer_t ret = {0, 0, 0};
     bytes_reserve(&ret, output_len);
     size_t i = 0;
     
