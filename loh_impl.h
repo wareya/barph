@@ -567,6 +567,8 @@ typedef struct _huff_node {
     // a huffman code for a symbol from a string of length N will never exceed log2(N) in length
     // (e.g. for a 65kbyte file, it's impossible for there to both be enough unique symbols AND
     //  an unbalanced-enough symbol distribution that the huffman tree is more than 16 levels deep)
+    // e.g. for a token to require 16 bits to code, it needs to occur have a freq around 1/65k...
+    // ... which can only happen if the surrounding data is at least 65k long! and log2(65k) == 16.
     // ((I haven't proven this to myself, but if it's wrong, it's only wrong by 1 bit))
     // so, storing codes from a 64-bit-address-space file in a 64-bit number is fine
     // (or, if I'm wrong, from a 63-bit-address-space file)
@@ -623,31 +625,43 @@ static void push_huff_node(bit_buffer_t * buf, huff_node_t * node, uint64_t dept
     }
 }
 
-static huff_node_t * pop_huff_node(bit_buffer_t * buf)
+uint16_t _popped_huff_nodes[1536];
+static uint16_t * pop_huff_node(bit_buffer_t * buf, size_t start, size_t * consumed_len)
 {
-    huff_node_t * ret;
-    ret = alloc_huff_node();
-    ret->symbol = 0;
-    ret->code = 0;
-    ret->code_len = 0;
-    ret->freq = 0;
-    ret->children[0] = 0;
-    ret->children[1] = 0;
+    if (start + 2 >= 1536)
+        return 0;
+    
+    _popped_huff_nodes[start    ] = 0;
+    _popped_huff_nodes[start + 1] = 0;
+    _popped_huff_nodes[start + 2] = 0;
     
     int children = bit_pop(buf);
     if (children)
     {
-        ret->children[0] = pop_huff_node(buf);
-        ret->children[1] = pop_huff_node(buf);
-        push_code(ret->children[0], 0);
-        push_code(ret->children[1], 1);
+        size_t left_size = 0;
+        uint16_t * left = pop_huff_node(buf, start + 3, &left_size);
+        left = left;
+        if (left_size == 0)
+            return 0;
+        
+        size_t right_size = 0;
+        uint16_t * right = pop_huff_node(buf, start + 3 + left_size, &right_size);
+        right = right;
+        if (right_size == 0)
+            return 0;
+        
+        _popped_huff_nodes[start    ] = 3;
+        _popped_huff_nodes[start + 1] = 3 + left_size;
+        
+        *consumed_len = 3 + left_size + right_size;
     }
     else
     {
-        ret->symbol = bits_pop(buf, 8);
+        _popped_huff_nodes[start + 2] = bits_pop(buf, 8);
+        *consumed_len = 3;
     }
     
-    return ret;
+    return &_popped_huff_nodes[start];
 }
 
 static bit_buffer_t huff_pack(uint8_t * data, size_t len)
@@ -771,7 +785,8 @@ static byte_buffer_t huff_unpack(bit_buffer_t * buf)
     buf->byte_index = 0;
     size_t output_len = bits_pop(buf, 8*8);
     
-    huff_node_t * root = pop_huff_node(buf);
+    size_t _size_unused;
+    uint16_t * root = pop_huff_node(buf, 0, &_size_unused);
     
     // the bit buffer is forcibly aligned to the start of the next byte at the end of the huff tree
     buf->bit_index = 0;
@@ -784,29 +799,28 @@ static byte_buffer_t huff_unpack(bit_buffer_t * buf)
     // operating on bit buffer input bytes is faster than operating on individual input bits
     uint8_t * in_data = buf->buffer.data;
     size_t in_data_len = buf->buffer.len;
-    huff_node_t * node = root;
+    uint16_t * node = root;
     for (size_t j = buf->byte_index; j < in_data_len; j++)
     {
         uint8_t byte = in_data[j];
         for (uint8_t b = 0; b < 8; b += 1)
         {
             uint8_t bit = byte & 1;
-            node = node->children[bit];
+            node += node[bit];
             byte >>= 1;
-            if (!node->children[0])
+            
+            if (!node[0])
             {
-                ret.data[i] = node->symbol;
-                node = root;
+                ret.data[i] = node[2];
                 i += 1;
                 if (i >= output_len)
                     goto out;
+                node = root;
             }
         }
     }
     out:
     ret.len = output_len;
-    
-    free_huff_nodes(root);
     
     return ret;
 }
