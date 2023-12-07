@@ -157,15 +157,14 @@ static const size_t min_lookback_length = 1;
 // for finding lookback matches, we use a fast lru cache based on a hash table
 // collisions and identical matches share eviction; the number of values per hash is static
 
-#define LOH_HASH_LENGTH 4
 // size of the hash function output in bits.
 // must be at most 32, but values significantly above 16 are a Bad Idea.
 // higher values take up exponentially more memory.
-#define LOH_HASH_SIZE 16
+#define LOH_HASH_SIZE 15
 // log2 of the number of values per key (0 -> 1 value per key, 1 -> 2, 2 -> 4, 3 -> 8, 4 -> 16, etc)
 // higher values are slower, but result in smaller files. 8 is the max.
 // higher values take up exponentially more memory and are exponentially slower.
-#define LOH_HASHTABLE_KEY_SHL 3
+#define LOH_HASHTABLE_KEY_SHL 2
 
 static const uint64_t hash_mask = (1 << LOH_HASH_SIZE) - 1;
 static const uint64_t hash_shl_max = 1 << LOH_HASHTABLE_KEY_SHL;
@@ -176,11 +175,7 @@ static uint64_t hashtable[(1<<LOH_HASH_SIZE)<<LOH_HASHTABLE_KEY_SHL];
 // hashtable of current cursor for overwriting, from 0 to just under (1<<SHL)
 static uint8_t hashtable_i[1<<LOH_HASH_SIZE];
 
-// hashtable hashing constants
-#define BRAPH_HASH_A_MULT 0x4C35
-#define BRAPH_HASH_B_MASK 0x5813
-#define BRAPH_HASH_B_MULT 0xACE1
-
+#define LOH_HASH_LENGTH 4
 static inline uint32_t hashmap_hash(const uint8_t * bytes)
 {
     // hashing function (can be anything; go ahead and optimize it as long as it doesn't result in tons of collisions)
@@ -190,10 +185,9 @@ static inline uint32_t hashmap_hash(const uint8_t * bytes)
     a |= ((uint32_t)bytes[1]) << 8;
     a |= ((uint32_t)bytes[2]) << 16;
     a |= ((uint32_t)bytes[3]) << 24;
-    // then just multiply it by the const and fold down the top 16 bits
+    // then just multiply it by the const and return the top N bits
     temp *= a;
-    temp ^= temp >> 16;
-    return temp & hash_mask;
+    return temp >> (32 - LOH_HASH_SIZE);
 }
 
 // bytes must point to four characters
