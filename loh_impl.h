@@ -913,8 +913,9 @@ static loh_byte_buffer huff_unpack(loh_bit_buffer * buf)
 }
 
 
-// passed-in data is modified, but not stored; it still belongs to the caller, and must be freed by the caller
-// returned data must be freed by the caller; it was allocated with LOH_MALLOC
+// input data is modified, but not stored; it still belongs to the caller, and must be freed by the caller
+// if huffman and lookback coding are both disabled, then the returned pointer is a pointer into the input data
+// otherwise, returned data must be freed by the caller; it was allocated with LOH_MALLOC
 static uint8_t * loh_decompress(uint8_t * data, size_t len, size_t * out_len, uint8_t check_checksum)
 {
     if (!data || !out_len) return 0;
