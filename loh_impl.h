@@ -161,7 +161,7 @@ static const size_t min_lookback_length = 1;
 // log2 of the number of values per key (0 -> 1 value per key, 1 -> 2, 2 -> 4, 3 -> 8, 4 -> 16, etc)
 // higher values are slower, but result in smaller files. 8 is the max.
 // higher values take up exponentially more memory and are exponentially slower.
-#define LOH_HASHTABLE_KEY_SHL 2
+#define LOH_HASHTABLE_KEY_SHL 3
 
 static const uint64_t hash_mask = (1 << LOH_HASH_SIZE) - 1;
 static const uint64_t hash_shl_max = 1 << LOH_HASHTABLE_KEY_SHL;
@@ -182,10 +182,8 @@ static inline uint32_t hashmap_hash(const uint8_t * bytes)
     // hashing function (can be anything; go ahead and optimize it as long as it doesn't result in tons of collisions)
     uint32_t temp = 0xA68BF1D7;
     for (size_t j = 0; j < LOH_HASH_LENGTH; j += 1)
-    {
-        temp ^= bytes[j];
-        temp *= 0x1011B0D5;
-    }
+        temp = (temp + bytes[j]) * 0x4706DA51;
+    temp ^= temp >> 16;
     return temp & hash_mask;
 }
 
@@ -219,16 +217,19 @@ static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer
         if (value >= i)
             break;
         
+        // early-out for things that can't possibly be an (efficient) match
+        if (bytes[0] != buffer[value] || bytes[1] != buffer[value + 1])
+            continue;
+        
         // find longest match
         const uint64_t chunk_size = 16;
         const uint64_t remaining = buffer_len - i;
         uint64_t size = 0;
         while (size + chunk_size < remaining)
         {
-            if (memcmp(&bytes[size], &buffer[value + size], chunk_size) == 0)
-                size += chunk_size;
-            else
+            if (memcmp(&bytes[size], &buffer[value + size], chunk_size) != 0)
                 break;
+            size += chunk_size;
         }
         while (size < remaining && bytes[size] == buffer[value + size])
             size += 1;
@@ -236,7 +237,7 @@ static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer
         if (size > best_size || (size == best_size && value > best))
         {
             // other entry hit was expensive to test; axe it
-            if (best_size > 64)
+            if (best_size >= 64)
                 hashtable[key + best_j] = 0;
             
             best_size = size;
@@ -245,7 +246,7 @@ static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer
             
             if (best_size >= 256) // good enough
                 break;
-            if (!final && best_size >= 16)
+            if (!final && best_size >= 8)
                 break;
         }
     }
@@ -400,20 +401,18 @@ static byte_buffer_t lookback_compress(const uint8_t * input, uint64_t input_len
         }
         
         // store a literal if we found no lookback
-        uint16_t size = 1;
-        while (size < (1 << 14) && i + size < input_len)
+        uint16_t size = 0;
+        while (size + 1 < (1 << 14) && i + size < input_len)
         {
             uint64_t _size_unused;
             uint64_t found_loc = hashmap_get_if_efficient(i + size, input, input_len, &_size_unused, 0);
             if (found_loc != (uint64_t)-1)
                 break;
             // need to update the hashmap mid-literal
-            if (i + size + LOH_HASH_LENGTH < input_len && size + 1 < (1 << 14))
+            if (i + size + LOH_HASH_LENGTH < input_len)
                 hashmap_insert(&input[i + size], i + size);
             size += 1;
         }
-        if (size == (1 << 14))
-            size -= 1;
         
         if (size > input_len - i)
             size = input_len - i;
@@ -429,8 +428,8 @@ static byte_buffer_t lookback_compress(const uint8_t * input, uint64_t input_len
         
         //printf("encoding literal with size %08X starting at %08llX\n", size, i);
         
-        for (size_t j = 0; j < size; ++j)
-            byte_push(&ret, input[i++]);
+        bytes_push(&ret, &input[i], size);
+        i += size;
     }
     
     return ret;
@@ -568,7 +567,9 @@ typedef struct _huff_node {
     // a huffman code for a symbol from a string of length N will never exceed log2(N) in length
     // (e.g. for a 65kbyte file, it's impossible for there to both be enough unique symbols AND
     //  an unbalanced-enough symbol distribution that the huffman tree is more than 16 levels deep)
-    // so, storing codes from a 64-bit-addressed file in a 64-bit number is fine
+    // ((I haven't proven this to myself, but if it's wrong, it's only wrong by 1 bit))
+    // so, storing codes from a 64-bit-address-space file in a 64-bit number is fine
+    // (or, if I'm wrong, from a 63-bit-address-space file)
     uint64_t code;
     uint8_t code_len;
     uint8_t symbol;
@@ -750,6 +751,9 @@ static bit_buffer_t huff_pack(uint8_t * data, size_t len)
     
     push_huff_node(&ret, queue[0], 0);
     
+    // the bit buffer is forcibly aligned to the start of the next byte at the end of the huff tree
+    ret.bit_index = 8;
+    
     for (size_t i = 0; i < len; i++)
     {
         uint8_t c = data[i];
@@ -765,21 +769,42 @@ static byte_buffer_t huff_unpack(bit_buffer_t * buf)
 {
     buf->bit_index = 0;
     buf->byte_index = 0;
-    size_t len = bits_pop(buf, 8*8);
-    
-    byte_buffer_t ret = {0, 0, 0};
-    bytes_reserve(&ret, len);
+    size_t output_len = bits_pop(buf, 8*8);
     
     huff_node_t * root = pop_huff_node(buf);
     
-    for(size_t i = 0; i < len; i++)
+    // the bit buffer is forcibly aligned to the start of the next byte at the end of the huff tree
+    buf->bit_index = 0;
+    buf->byte_index += 1;
+    
+    byte_buffer_t ret = {0, 0, 0};
+    bytes_reserve(&ret, output_len);
+    size_t i = 0;
+    
+    // operating on bit buffer input bytes is faster than operating on individual input bits
+    uint8_t * in_data = buf->buffer.data;
+    size_t in_data_len = buf->buffer.len;
+    huff_node_t * node = root;
+    for (size_t j = buf->byte_index; j < in_data_len; j++)
     {
-        huff_node_t * node = root;
-        node = node->children[bit_pop(buf)];
-        while (node->children[0])
-            node = node->children[bit_pop(buf)];
-        byte_push(&ret, node->symbol);
+        uint8_t byte = in_data[j];
+        for (uint8_t b = 0; b < 8; b += 1)
+        {
+            uint8_t bit = byte & 1;
+            node = node->children[bit];
+            byte >>= 1;
+            if (!node->children[0])
+            {
+                ret.data[i] = node->symbol;
+                node = root;
+                i += 1;
+                if (i >= output_len)
+                    goto out;
+            }
+        }
     }
+    out:
+    ret.len = output_len;
     
     free_huff_nodes(root);
     
@@ -800,7 +825,7 @@ static uint8_t * loh_compress(uint8_t * data, size_t len, uint8_t do_lookback, u
     uint32_t checksum = 0x87654321;
     
     for (size_t i = 0; i < len; i += 1)
-        checksum = (checksum ^ buf.data[i] ^ i) * big_prime;
+        checksum = (checksum + buf.data[i]) * big_prime;
     
     if (do_diff)
     {
@@ -898,7 +923,7 @@ static uint8_t * loh_decompress(uint8_t * data, size_t len, size_t * out_len)
     if (stored_checksum != 0)
     {
         for (size_t i = 0; i < buf.len; i += 1)
-            checksum = (checksum ^ buf.data[i] ^ i) * big_prime;
+            checksum = (checksum + buf.data[i]) * big_prime;
     }
     else
         checksum = stored_checksum;
