@@ -233,9 +233,10 @@ static inline uint64_t hashmap_get(const uint8_t * bytes, const uint8_t * buffer
             continue;
         
         // find longest match
-        // testing in chunks is significantly faster than testing byte-by-byte
+        // if we hit 128 bytes we call it good enough and take it
         const uint64_t good_enough_length = 128;
         
+        // testing in chunks is significantly faster than testing byte-by-byte
         const uint64_t chunk_size = 16;
         uint64_t remaining = buffer_len - i;
         if (remaining > good_enough_length)
@@ -580,8 +581,8 @@ static loh_bit_buffer huff_pack(uint8_t * data, size_t len)
         new_node->code = 0;
         new_node->code_len = 0;
         new_node->freq = lowest->freq + next_lowest->freq;
-        new_node->children[0] = lowest;
-        new_node->children[1] = next_lowest;
+        new_node->children[0] = next_lowest;
+        new_node->children[1] = lowest;
         
         push_code(new_node->children[0], 0);
         push_code(new_node->children[1], 1);

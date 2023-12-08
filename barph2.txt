@@ -5,7 +5,9 @@ xxxx xx10 u8 ...
 long literals, ... contains <u8 xxxx xx> literals
 
 
+
 Lookback: one of the lookback distance signals, followed by a lookback length.
+
 
 Lookback distance signals:
 
@@ -21,11 +23,12 @@ xxxx 0111 +u16
 Lookback has a distance <u16 xxxx>. The u16 is least-significant-chunk-first.
 
 xxx0 1111 +u24
-20-bit lookback
+27-bit lookback
 Etc.
 
 xx01 1111 +u32
 34-bit lookback
+
 
 Lookback lengths:
 
