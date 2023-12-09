@@ -32,9 +32,9 @@ white noise.bin.-9.zip | 27007 KB | 0.880s | 0.175s
 white noise.bin.loh | 27006 KB | **0.726s** | 0.271s
 -|-|-|-
 oops all zeroes.bin | 27002 KB | - | -
-oops all zeroes.bin.-9.lz4 | 107 KB * | 0.136s | **0.134s**
+oops all zeroes.bin.-9.lz4 | 107 KB * | **0.136s** | **0.134s**
 oops all zeroes.bin.-9.zip | 27 KB | 0.173s | 0.139s
-oops all zeroes.bin.loh | **462 Bytes** | **0.139s** | 0.152s
+oops all zeroes.bin.loh | **462 Bytes** | 0.139s | 0.152s
 -|-|-|-
 blake recorded 11.wav | 27002 KB | - | -
 blake recorded 11.wav.-9.lz4 | 26376 KB | 0.972s | **0.164s**
