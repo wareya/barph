@@ -4,7 +4,7 @@ Lookback and huffman compression codec as a single-header library.
 
 Public domain, extremely small* lookback (LZSS) and Huffman compression, with optional delta coding.
 
-LOH's compression ratio is mediocre, except on audio and images, where its compression ratio outperforms codecs that don't perform delta coding. LOH's compressor is faster than others. Its decompressor is much slower.
+LOH's compressor is fast, and its decompressor is slow. Its compression ratio is mediocre, except on uncompressed audio and images, where it outperforms codecs that don't support delta coding.
 
 LOH is meant to be embedded into other applications, not used as a general purpose compression tool. The encoder and decoder implemented here are not streaming, but streaming encoders and decoders are possible and shouldn't be too hard to write.
 
