@@ -427,8 +427,6 @@ static loh_byte_buffer lookback_compress(const uint8_t * input, uint64_t input_l
                     exit(-1);
                 }
                 
-                //printf("encoding lookback with size %08llX and distance %08llX starting at %08llX\n", size, dist, i);
-                
                 // push size
                 if (size > 0x7F)
                 {
@@ -474,8 +472,6 @@ static loh_byte_buffer lookback_compress(const uint8_t * input, uint64_t input_l
         }
         else
             byte_push(&ret, (size << 2));
-        
-        //printf("encoding literal with size %08X starting at %08llX\n", size, i);
         
         bytes_push(&ret, &input[i], size);
         i += size;
@@ -994,42 +990,23 @@ static loh_byte_buffer huff_unpack(loh_bit_buffer * buf, int * error)
         }
         uint8_t symbol = bits_pop(buf, 8);
         
-        /*
-        printf("assigning symbol %02X with code value: ", symbol);
-        for (size_t i = 0; i < code_depth; i++)
-        {
-            uint64_t code2 = code_value;
-            if (i + 1 != code_depth)
-                code2 >>= code_depth - 1 - i;
-            printf("%c", (code2 & 1) ? '1' : '0');
-        }
-        puts("");
-        */
-        
         symbols[code_value] = symbol;
         max_codes[code_depth] = code_value + 1;
         code_value += 1;
     }
     max_codes[code_depth] = 0xFFFF;
-    /*
-    for (size_t code_depth = 1; code_depth <= 15; code_depth++)
-    {
-        for (size_t i = 0; i <= code_depth; i++)
-        {
-            uint64_t code2 = max_codes[code_depth];
-            if (i != code_depth)
-                code2 >>= code_depth - i;
-            printf("%c", (code2 & 1) ? '1' : '0');
-        }
-        puts("");
-    }
-    */
     
     // the bit buffer is forcibly aligned to the start of the next byte at the end of the huffman tree data
-    buf->bit_index = 0;
-    buf->byte_index += 1;
+    if (buf->bit_index != 0)
+    {
+        buf->bit_index = 0;
+        buf->byte_index += 1;
+    }
     
-    bytes_reserve(&ret, output_len);
+    // reserve 8 extra bytes because we might write extra garbage bytes at the end
+    // (we do this to avoid having to spend a branch jumping out of a loop)
+    bytes_reserve(&ret, output_len + 8);
+    
     if (!ret.data)
     {
         *error = 1;
@@ -1038,34 +1015,31 @@ static loh_byte_buffer huff_unpack(loh_bit_buffer * buf, int * error)
     
     size_t i = 0;
     
-    // operating on bit buffer input bytes is faster than operating on individual input bits
     uint8_t * in_data = buf->buffer.data;
     size_t in_data_len = buf->buffer.len;
     uint16_t code_word = 0;
-    uint8_t code_len = 1;
-    // finish up any remaining input bytes
+    uint16_t * max_code = max_codes + 1;
+    // consume all remaining input bytes
     for (size_t j = buf->byte_index; j < in_data_len; j++)
     {
-        // loop over bits in each byte
-        uint64_t word = in_data[j];
+        // operating on bit buffer input bytes/words is faster than operating on individual input bits
+        uint16_t word = in_data[j];
         for (uint8_t b = 0; b < 8; b += 1)
         {
-            code_word = code_word | (uint16_t)(word & 1);
+            code_word = code_word | (word & 1);
             word >>= 1;
-            if (code_word < max_codes[code_len])
+            if (code_word < *max_code++)
             {
                 ret.data[i++] = symbols[code_word];
-                if (i >= output_len)
-                    goto out;
                 code_word = 0;
-                code_len = 0;
+                max_code = max_codes + 1;
             }
-            code_len += 1;
             code_word <<= 1;
         }
     }
-    out:
     ret.len = output_len;
+
+#undef _LOH_PROCESS_WORD
     
     return ret;
 }
