@@ -68,7 +68,7 @@ int main(int argc, char ** argv)
     }
     else if (argv[1][0] == 'x')
     {
-        buf.data = loh_decompress(buf.data, buf.len, &buf.len, 0);
+        buf.data = loh_decompress(buf.data, buf.len, &buf.len, 1);
         
         if (buf.data)
         {

@@ -27,7 +27,7 @@
 #define LOH_FREE free
 #endif
 
-/* data structures */
+/* data structures and other shared code */
 
 typedef struct {
     uint8_t * data;
@@ -42,6 +42,8 @@ static inline void bytes_reserve(loh_byte_buffer * buf, size_t extra)
     while (buf->len + extra > buf->cap)
         buf->cap <<= 1;
     buf->data = (uint8_t *)LOH_REALLOC(buf->data, buf->cap);
+    if (!buf->data)
+        buf->cap = 0;
 }
 static inline void bytes_push(loh_byte_buffer * buf, const uint8_t * bytes, size_t count)
 {
@@ -131,6 +133,8 @@ static inline void bit_push(loh_bit_buffer * buf, uint8_t data)
 }
 static inline uint64_t bits_pop(loh_bit_buffer * buf, uint8_t bits)
 {
+    if (buf->byte_index >= buf->buffer.len)
+        return 0;
     if (bits == 0)
         return 0;
     uint64_t ret = 0;
@@ -148,6 +152,8 @@ static inline uint64_t bits_pop(loh_bit_buffer * buf, uint8_t bits)
 }
 static inline uint8_t bit_pop(loh_bit_buffer * buf)
 {
+    if (buf->byte_index >= buf->buffer.len)
+        return 0;
     if (buf->bit_index >= 8)
     {
         buf->bit_index -= 8;
@@ -157,6 +163,34 @@ static inline uint8_t bit_pop(loh_bit_buffer * buf)
     buf->bit_index += 1;
     
     return ret;
+}
+
+static uint32_t loh_checksum(uint8_t * data, size_t len)
+{
+    const uint32_t stripes = 4;
+    const uint32_t big_prime = 0x1011B0D5;
+    uint32_t checksum = 0x87654321;
+    
+    uint32_t partial_sum[stripes];
+    for (size_t j = 0; j < stripes; j++)
+        partial_sum[j] = checksum + j;
+    
+    size_t checksum_i = 0;
+    while (checksum_i + (stripes - 1) < len)
+    {
+        for (size_t j = 0; j < stripes; j++)
+            partial_sum[j] = (partial_sum[j] + data[checksum_i++]) * big_prime;
+    }
+    
+    for (size_t j = 0; j < stripes; j++)
+        checksum = (checksum + partial_sum[j]) * big_prime;
+    
+    while (checksum_i < len)
+        checksum = (checksum + data[checksum_i++]) * big_prime;
+    
+    checksum += len;
+    
+    return checksum;
 }
 
 /* compression */
@@ -453,14 +487,14 @@ static loh_byte_buffer lookback_compress(const uint8_t * input, uint64_t input_l
 typedef struct _huff_node {
     struct _huff_node * children[2];
     int64_t freq;
-    // a huffman code for a symbol from a string of length N will never exceed log2(N) in length
+    // A huffman code for a symbol from a string of length N will never exceed log2(N) in length.
     // (e.g. for a 65kbyte file, it's impossible for there to both be enough unique symbols AND
     //  an unbalanced-enough symbol distribution that the huffman tree is more than 16 levels deep)
-    // e.g. for a token to require 16 bits to code, it needs to occur have a freq around 1/65k...
-    // ... which can only happen if the surrounding data is at least 65k long! and log2(65k) == 16.
-    // ((I haven't proven this to myself, but if it's wrong, it's only wrong by 1 bit))
-    // so, storing codes from a 64-bit-address-space file in a 64-bit number is fine
-    // (or, if I'm wrong, from a 63-bit-address-space file)
+    // For a token to require 16 bits to code, it needs to occur have a freq around 1/65k,
+    //  which can only happen if the surrounding data is at least 65k long! and log2(65k) == 16.
+    // (I haven't proven this to myself, but if it's wrong, it's only wrong by 1 bit.)
+    // So, storing codes from a 64-bit-address-space file in a 64-bit number is fine.
+    // (Or, if I'm wrong, from a 63-bit-address-space file.)
     uint64_t code;
     uint8_t code_len;
     uint8_t symbol;
@@ -499,33 +533,70 @@ static int count_compare(const void * a, const void * b)
     return n > 0 ? 1 : n < 0 ? -1 : 0;
 }
 
-static void push_huff_node(loh_bit_buffer * buf, huff_node_t * node, uint64_t depth)
+static int huff_len_compare(const void * a, const void * b)
 {
-    if (node->children[0] && node->children[1])
-    {
-        bit_push(buf, 1);
-        push_huff_node(buf, node->children[0], depth + 1);
-        push_huff_node(buf, node->children[1], depth + 1);
-    }
-    else
-    {
-        bit_push(buf, 0);
-        bits_push(buf, node->symbol, 8);
-    }
+    int64_t len_a = (*(huff_node_t**)a)->code_len;
+    int64_t len_b = (*(huff_node_t**)b)->code_len;
+    if (len_a < len_b)
+        return -1;
+    else if (len_a > len_b)
+        return 1;
+    int64_t freq_a = (*(huff_node_t**)a)->freq;
+    int64_t freq_b = (*(huff_node_t**)b)->freq;
+    if (freq_a > freq_b)
+        return -1;
+    else if (freq_a < freq_b)
+        return 1;
+    return 0;
 }
-
 static loh_bit_buffer huff_pack(uint8_t * data, size_t len)
 {
     // build huff dictionary
     
     // count bytes, then sort them
-    // we stuff the byte identity into the bottom 8 bits
     uint64_t counts[256] = {0};
+    uint64_t total_count = len;
     for (size_t i = 0; i < len; i += 1)
-        counts[data[i]] += 256;
+        counts[data[i]] += 1;
+    // we stuff the byte identity into the bottom 8 bits
+    size_t symbol_count = 0;
     for (size_t b = 0; b < 256; b++)
-        counts[b] |= b;
+    {
+        if (counts[b])
+            symbol_count += 1;
+        counts[b] = (counts[b] << 8) | b;
+    }
+    
     qsort(&counts, 256, sizeof(uint64_t), count_compare);
+    
+    // we want to generate a code with a maximum of 15 bits...
+    // ... which means that the minimum frequency must be at least 1/32768 of the total count
+    if (symbol_count > 0)
+    {
+        // use ceiled division to make super extra sure that we don't go over 1/32768
+        uint64_t min_ok_count = (total_count + 32767) / 32768;
+        while ((counts[symbol_count-1] >> 8) < min_ok_count)
+        {
+            for (int i = symbol_count-1; i >= 0; i -= 1)
+            {
+                // We use an x = max(minimum, x) approach instead of just adding to every count, because
+                //  if we never add to the most frequent item's frequency, we will definitely converge.
+                // (Specifically, this is guaranteed to converge if there are 32768 or less symbols in
+                //  the dictionary, which there are. There are only 256 at most.)
+                // More proof of convergence: We will eventually add less than 32768 to "total_count"
+                //  two `while` iterations in a row, which will cause min_ok_count to stop changing.
+                if (counts[i] >> 8 < min_ok_count)
+                {
+                    uint64_t diff = min_ok_count - (counts[i] >> 8);
+                    counts[i] += diff << 8;
+                    total_count += diff;
+                }
+                else
+                    break;
+            }
+            min_ok_count = (total_count + 32767) / 32768;
+        }
+    }
     
     // set up raw huff nodes
     huff_node_t * unordered_dict[256];
@@ -606,55 +677,101 @@ static loh_bit_buffer huff_pack(uint8_t * data, size_t len)
         }
     }
     
-    // set up buffers and start pushing data to them
+    // With the above done, our basic huffman tree is built. Now we need to canonicalize it.
+    // Canonicalization algorithms only work on sorted lists. Because of frequency ties, our
+    //  code list might not be sorted by code length. Let's fix that by sorting it first.
     
+    qsort(&unordered_dict, symbol_count, sizeof(huff_node_t*), huff_len_compare);
+    
+    // Now we ACTUALLY canonicalize the huffman code list.
+    
+    uint64_t canon_code = 0;
+    uint64_t canon_len = 0;
+    uint16_t codes_per_len[256] = {0};
+    for (size_t i = 0; i < symbol_count; i += 1)
+    {
+        if (canon_code == 0)
+        {
+            canon_len = unordered_dict[i]->code_len;
+            codes_per_len[canon_len] += 1;
+            unordered_dict[i]->code = 0;
+            canon_code += 1;
+            continue;
+        }
+        if (unordered_dict[i]->code_len > canon_len)
+            canon_code <<= unordered_dict[i]->code_len - canon_len;
+        
+        canon_len = unordered_dict[i]->code_len;
+        codes_per_len[canon_len] += 1;
+        uint64_t code = canon_code;
+        // we store codes with the most significant huffman bit in the least significant word bit
+        // (this makes string encoding faster)
+        for (size_t b = 0; b < canon_len / 2; b++)
+        {
+            size_t b2 = canon_len - b - 1;
+            uint64_t diff = (!((code >> b) & 1)) != (!((code >> b2) & 1));
+            diff = (diff << b) | (diff << b2);
+            code ^= diff;
+        }
+        unordered_dict[i]->code = code;
+        
+        canon_code += 1;
+    }
+    
+    // Our canonical length-limited huffman code is finally done!
+    // To print it out (with modified frequencies):
+    /*
+    for (size_t c = 0; c < symbol_count; c += 1)
+    {
+        printf("%02X: ", unordered_dict[c]->symbol);
+        for (size_t i = 0; i < unordered_dict[c]->code_len; i++)
+            printf("%c", ((unordered_dict[c]->code >> i) & 1) ? '1' : '0');
+        printf("\t %lld", unordered_dict[c]->freq);
+        puts("");
+    }
+    */
+    
+    // Now we actually compress the input data.
+    
+    // set up buffers and start pushing data to them
     loh_bit_buffer ret;
     memset(&ret, 0, sizeof(loh_bit_buffer));
     
     bits_push(&ret, len, 8*8);
     
-    push_huff_node(&ret, queue[0], 0);
-    
-    // the bit buffer is forcibly aligned to the start of the next byte at the end of the huff tree
-    ret.bit_index = 8;
-    
-    for (size_t i = 0; i < len; i++)
+    // push huffman code description
+    // start at code length 1
+    // bit 1: add 1 to code length
+    // bit 0: read next 8 bits as symbol for next code. add 1 to code
+    if (len > 0)
     {
-        uint8_t c = data[i];
-        bits_push(&ret, dict[c]->code, dict[c]->code_len);
+        bits_push(&ret, symbol_count - 1, 8);
+        size_t code_depth = 1;
+        for (size_t i = 0; i < symbol_count; i++)
+        {
+            while (code_depth < unordered_dict[i]->code_len)
+            {
+                bit_push(&ret, 1);
+                code_depth += 1;
+            }
+            bit_push(&ret, 0);
+            bits_push(&ret, unordered_dict[i]->symbol, 8);
+        }
     }
     
+    // the bit buffer is forcibly aligned to the start of the next byte at the end of the huff tree
+    if (ret.bit_index != 0)
+        ret.bit_index = 8;
+    
+    // push huffman-coded string
+    for (size_t i = 0; i < len; i++)
+        bits_push(&ret, dict[data[i]]->code, dict[data[i]]->code_len);
+    
+    // despite all we've done to them, our huffman tree nodes still have their child pointers intact
+    // so we can recursively free all our nodes all at once
     free_huff_nodes(queue[0]);
     
     return ret;
-}
-
-static uint32_t loh_checksum(uint8_t * data, size_t len)
-{
-    const uint32_t stripes = 4;
-    const uint32_t big_prime = 0x1011B0D5;
-    uint32_t checksum = 0x87654321;
-    
-    uint32_t partial_sum[stripes];
-    for (size_t j = 0; j < stripes; j++)
-        partial_sum[j] = checksum + j;
-    
-    size_t checksum_i = 0;
-    while (checksum_i + (stripes - 1) < len)
-    {
-        for (size_t j = 0; j < stripes; j++)
-            partial_sum[j] = (partial_sum[j] + data[checksum_i++]) * big_prime;
-    }
-    
-    for (size_t j = 0; j < stripes; j++)
-        checksum = (checksum + partial_sum[j]) * big_prime;
-    
-    while (checksum_i < len)
-        checksum = (checksum + data[checksum_i++]) * big_prime;
-    
-    checksum += len;
-    
-    return checksum;
 }
 
 // passed-in data is modified, but not stored; it still belongs to the caller, and must be freed by the caller
@@ -706,9 +823,9 @@ static uint8_t * loh_compress(uint8_t * data, size_t len, uint8_t do_lookback, u
 
 /* decompression */
 
-// On error, the output loh_byte_buffer's cap will be 0 *AND* its len will be greater than 0.
+// On error, the value poitned to by the error parameter will be set to 1.
 // Any partially-decompressed data is returned rather than being freed and nulled.
-static loh_byte_buffer lookback_decompress(const uint8_t * input, size_t input_len)
+static loh_byte_buffer lookback_decompress(const uint8_t * input, size_t input_len, int * error)
 {
     size_t i = 0;
     
@@ -733,11 +850,16 @@ static loh_byte_buffer lookback_decompress(const uint8_t * input, size_t input_l
     
     bytes_reserve(&ret, size);
     
+    if (!ret.data)
+    {
+        *error = 1;
+        return ret;
+    }
+    
 #define _LOH_CHECK_I_VS_LEN_OR_RETURN \
     if (i >= input_len)\
     {\
-        ret.len = 1;\
-        ret.cap = 0;\
+        *error = 1;\
         return ret;\
     }
 
@@ -832,41 +954,7 @@ static loh_byte_buffer lookback_decompress(const uint8_t * input, size_t input_l
     return ret;
 }
 
-static uint8_t pop_huff_node(uint16_t * base_buffer, size_t max_len, loh_bit_buffer * buf, size_t start, size_t * consumed_len)
-{
-    if (start + 2 >= max_len)
-        return 1;
-    
-    base_buffer[start    ] = 0;
-    base_buffer[start + 1] = 0;
-    
-    int children = bit_pop(buf);
-    if (children)
-    {
-        size_t left_size = 0;
-        if (pop_huff_node(base_buffer, max_len, buf, start + 2, &left_size))
-            return 1;
-        
-        size_t right_size = 0;
-        if (pop_huff_node(base_buffer, max_len, buf, start + 2 + left_size, &right_size))
-            return 1;
-        
-        base_buffer[start    ] = 2;
-        base_buffer[start + 1] = 2 + left_size;
-        
-        *consumed_len = 2 + left_size + right_size;
-    }
-    else
-    {
-        base_buffer[start    ] = 0;
-        base_buffer[start + 1] = bits_pop(buf, 8);
-        *consumed_len = 2;
-    }
-    
-    return 0;
-}
-
-static loh_byte_buffer huff_unpack(loh_bit_buffer * buf)
+static loh_byte_buffer huff_unpack(loh_bit_buffer * buf, int * error)
 {
     buf->bit_index = 0;
     buf->byte_index = 0;
@@ -874,48 +962,106 @@ static loh_byte_buffer huff_unpack(loh_bit_buffer * buf)
     
     loh_byte_buffer ret = {0, 0, 0};
     
-    // Load huffman tree data as a flat jump buffer.
-    // Each node has two array cells.
-    // If a given node is a parent, its first cell will be the relative offset to its left branch node
-    // and its second cell will be the same to its right.
-    // If a given node is not a parent, then its first cell will be 0, and its second cell will be the symbol.
-    size_t _size_unused;
-    uint16_t root[1024];
-    if (pop_huff_node(root, 1024, buf, 0, &_size_unused))
+    // if output length is 0, stop decoding
+    if (output_len == 0)
+    {
+        bytes_reserve(&ret, output_len);
         return ret;
+    }
+    
+    // load huffman code description
+    // starts at code length 1
+    // bit 1: add 1 to code length
+    // bit 0: read next 8 bits as symbol for next code. add 1 to code
+    uint16_t symbol_count = bits_pop(buf, 8) + 1;
+    uint16_t max_codes[16] = {0};
+    uint8_t symbols[32768] = {0};
+    uint16_t code_value = 0;
+    size_t code_depth = 1;
+    for (size_t i = 0; i < symbol_count; i++)
+    {
+        uint8_t bit = bit_pop(buf);
+        while (bit)
+        {
+            code_value <<= 1;
+            code_depth += 1;
+            bit = bit_pop(buf);
+            if (code_depth > 15)
+            {
+                *error = 1;
+                return ret;
+            }
+        }
+        uint8_t symbol = bits_pop(buf, 8);
+        
+        /*
+        printf("assigning symbol %02X with code value: ", symbol);
+        for (size_t i = 0; i < code_depth; i++)
+        {
+            uint64_t code2 = code_value;
+            if (i + 1 != code_depth)
+                code2 >>= code_depth - 1 - i;
+            printf("%c", (code2 & 1) ? '1' : '0');
+        }
+        puts("");
+        */
+        
+        symbols[code_value] = symbol;
+        max_codes[code_depth] = code_value + 1;
+        code_value += 1;
+    }
+    max_codes[code_depth] = 0xFFFF;
+    /*
+    for (size_t code_depth = 1; code_depth <= 15; code_depth++)
+    {
+        for (size_t i = 0; i <= code_depth; i++)
+        {
+            uint64_t code2 = max_codes[code_depth];
+            if (i != code_depth)
+                code2 >>= code_depth - i;
+            printf("%c", (code2 & 1) ? '1' : '0');
+        }
+        puts("");
+    }
+    */
     
     // the bit buffer is forcibly aligned to the start of the next byte at the end of the huffman tree data
     buf->bit_index = 0;
     buf->byte_index += 1;
     
     bytes_reserve(&ret, output_len);
+    if (!ret.data)
+    {
+        *error = 1;
+        return ret;
+    }
+    
     size_t i = 0;
     
     // operating on bit buffer input bytes is faster than operating on individual input bits
     uint8_t * in_data = buf->buffer.data;
     size_t in_data_len = buf->buffer.len;
-    uint16_t * node = root;
+    uint16_t code_word = 0;
+    uint8_t code_len = 1;
+    // finish up any remaining input bytes
     for (size_t j = buf->byte_index; j < in_data_len; j++)
     {
-        // loop over bits in each byte and walk the huffman tree accordingly
-        uint8_t byte = in_data[j];
+        // loop over bits in each byte
+        uint64_t word = in_data[j];
         for (uint8_t b = 0; b < 8; b += 1)
         {
-            // left or right branch (node will always be a valid parent before reading this bit)
-            uint8_t bit = byte & 1;
-            node += node[bit];
-            byte >>= 1;
-            
-            // if this is a leaf note, output a byte and start over
-            if (!node[0])
+            code_word = code_word | (uint16_t)(word & 1);
+            word >>= 1;
+            if (code_word < max_codes[code_len])
             {
-                ret.data[i] = node[1];
-                i += 1;
-                // if we just output the last byte, we're done here
+                ret.data[i++] = symbols[code_word];
                 if (i >= output_len)
                     goto out;
-                node = root;
+                code_word = 0;
+                code_len = 0;
             }
+            code_len += 1;
+            code_word <<= 1;
         }
     }
     out:
@@ -956,18 +1102,26 @@ static uint8_t * loh_decompress(uint8_t * data, size_t len, size_t * out_len, ui
         loh_bit_buffer compressed;
         memset(&compressed, 0, sizeof(loh_bit_buffer));
         compressed.buffer = buf;
-        loh_byte_buffer new_buf = huff_unpack(&compressed);
+        int error = 0;
+        loh_byte_buffer new_buf = huff_unpack(&compressed, &error);
         if (buf.data != data + header_size)
             LOH_FREE(buf.data);
         buf = new_buf;
+        if (error)
+        {
+            if (buf.data && buf.data != data + header_size)
+                LOH_FREE(buf.data);
+            return 0;
+        }
     }
     if (do_lookback)
     {
-        loh_byte_buffer new_buf = lookback_decompress(buf.data, buf.len);
+        int error = 0;
+        loh_byte_buffer new_buf = lookback_decompress(buf.data, buf.len, &error);
         if (buf.data != data + header_size)
             LOH_FREE(buf.data);
         buf = new_buf;
-        if (buf.len > buf.cap)
+        if (error)
         {
             if (buf.data && buf.data != data + header_size)
                 LOH_FREE(buf.data);
