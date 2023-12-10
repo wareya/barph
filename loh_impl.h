@@ -852,8 +852,8 @@ static loh_byte_buffer lookback_decompress(const uint8_t * input, size_t input_l
         return ret;
     }
     
-#define _LOH_CHECK_I_VS_LEN_OR_RETURN \
-    if (i >= input_len)\
+#define _LOH_CHECK_I_VS_LEN_OR_RETURN(N) \
+    if (i + N > input_len)\
     {\
         *error = 1;\
         return ret;\
@@ -872,55 +872,48 @@ static loh_byte_buffer lookback_decompress(const uint8_t * input, size_t input_l
             else if (!(dat & 4))
             {
                 loc = dat >> 3;
-                _LOH_CHECK_I_VS_LEN_OR_RETURN
+                _LOH_CHECK_I_VS_LEN_OR_RETURN(1)
                 loc |= ((uint64_t)input[i++]) << 5;
             }
             else if (!(dat & 8))
             {
                 loc = dat >> 4;
-                _LOH_CHECK_I_VS_LEN_OR_RETURN
+                _LOH_CHECK_I_VS_LEN_OR_RETURN(2)
                 loc |= ((uint64_t)input[i++]) << 4;
-                _LOH_CHECK_I_VS_LEN_OR_RETURN
                 loc |= ((uint64_t)input[i++]) << 12;
             }
             else if (!(dat & 0x10))
             {
                 loc = dat >> 5;
-                _LOH_CHECK_I_VS_LEN_OR_RETURN
+                _LOH_CHECK_I_VS_LEN_OR_RETURN(3)
                 loc |= ((uint64_t)input[i++]) << 3;
-                _LOH_CHECK_I_VS_LEN_OR_RETURN
                 loc |= ((uint64_t)input[i++]) << 11;
-                _LOH_CHECK_I_VS_LEN_OR_RETURN
                 loc |= ((uint64_t)input[i++]) << 19;
             }
             else if (!(dat & 0x20))
             {
                 loc = dat >> 6;
-                _LOH_CHECK_I_VS_LEN_OR_RETURN
+                _LOH_CHECK_I_VS_LEN_OR_RETURN(4)
                 loc |= ((uint64_t)input[i++]) << 2;
-                _LOH_CHECK_I_VS_LEN_OR_RETURN
                 loc |= ((uint64_t)input[i++]) << 10;
-                _LOH_CHECK_I_VS_LEN_OR_RETURN
                 loc |= ((uint64_t)input[i++]) << 18;
-                _LOH_CHECK_I_VS_LEN_OR_RETURN
                 loc |= ((uint64_t)input[i++]) << 26;
             }
             
             // bounds limit
             if (loc > ret.len)
             {
-                ret.len = 2;
-                ret.cap = 0;
+                *error = 1;
                 return ret;
             }
             
-            _LOH_CHECK_I_VS_LEN_OR_RETURN
+            _LOH_CHECK_I_VS_LEN_OR_RETURN(1)
             uint8_t size_dat = input[i++];
             
             uint16_t size = size_dat >> 1;
             if (size_dat & 1)
             {
-                _LOH_CHECK_I_VS_LEN_OR_RETURN
+                _LOH_CHECK_I_VS_LEN_OR_RETURN(1)
                 size |= ((uint16_t)input[i++]) << 7;
             }
             
@@ -936,7 +929,7 @@ static loh_byte_buffer lookback_decompress(const uint8_t * input, size_t input_l
             // this bit is true if the literal is long and has an extra length byte
             if (dat & 2)
             {
-                _LOH_CHECK_I_VS_LEN_OR_RETURN
+                _LOH_CHECK_I_VS_LEN_OR_RETURN(1)
                 size |= ((uint16_t)input[i++]) << 6;
             }
             
@@ -1013,30 +1006,43 @@ static loh_byte_buffer huff_unpack(loh_bit_buffer * buf, int * error)
         return ret;
     }
     
-    size_t i = 0;
     
     uint8_t * in_data = buf->buffer.data;
     size_t in_data_len = buf->buffer.len;
-    uint16_t code_word = 0;
-    uint16_t * max_code = max_codes + 1;
-    // consume all remaining input bytes
-    for (size_t j = buf->byte_index; j < in_data_len; j++)
-    {
-        // operating on bit buffer input bytes/words is faster than operating on individual input bits
-        uint16_t word = in_data[j];
-        for (uint8_t b = 0; b < 8; b += 1)
-        {
-            code_word = code_word | (word & 1);
-            word >>= 1;
-            if (code_word < *max_code++)
-            {
-                ret.data[i++] = symbols[code_word];
-                code_word = 0;
-                max_code = max_codes + 1;
-            }
-            code_word <<= 1;
-        }
+    size_t j = buf->byte_index;
+    uint8_t bits_left = 8;
+    uint64_t huff_bits = j < in_data_len ? in_data[j++] : 0;
+    size_t i = 0;
+#define PROCESS_LOOP(source_expr)\
+    {\
+        uint16_t code_word = 0;\
+        uint16_t * max_code = max_codes + 1;\
+        for (size_t b = 0; b < 15; b++)\
+        {\
+            code_word = code_word | (huff_bits & 1);\
+            huff_bits >>= 1;\
+            bits_left -= 1;\
+            if (bits_left == 0)\
+            {\
+                huff_bits = source_expr;\
+                bits_left = 8;\
+            }\
+            if (code_word < *max_code++)\
+            {\
+                ret.data[i++] = symbols[code_word];\
+                break;\
+            }\
+            code_word <<= 1;\
+        }\
     }
+    
+    // read as many input bytes as are safe to read without bounds checks
+    while (i < output_len && j + 8 < in_data_len) // a single code word will never consume anywhere near 8 bytes
+        PROCESS_LOOP(in_data[j++]);
+    // finish up with bounds checks
+    while (i < output_len)
+        PROCESS_LOOP(j < in_data_len ? in_data[j++] : 0);
+
     ret.len = output_len;
 
 #undef _LOH_PROCESS_WORD
