@@ -622,15 +622,18 @@ static loh_bit_buffer huff_pack(uint8_t * data, size_t len)
         queue[i] = unordered_dict[i];
     
     // remove zero-frequency items from the input queue
-    while (queue[queue_count - 1]->freq == 0 && queue_count > 0)
+    while (queue_count > 0 && queue[queue_count - 1]->freq == 0)
     {
         free_huff_nodes(queue[queue_count - 1]);
         queue_count -= 1;
     }
     
+    uint8_t queue_needs_free = 0;
     // start pumping through the queues
     while (queue_count > 1)
     {
+        queue_needs_free = 1;
+        
         huff_node_t * lowest = queue[queue_count - 1];
         huff_node_t * next_lowest = queue[queue_count - 2];
         
@@ -678,6 +681,10 @@ static loh_bit_buffer huff_pack(uint8_t * data, size_t len)
     //  code list might not be sorted by code length. Let's fix that by sorting it first.
     
     qsort(&unordered_dict, symbol_count, sizeof(huff_node_t*), huff_len_compare);
+    
+    // If we only have one symbol, we need to ensure that it thinks it has a code length of exactly 1.
+    if (symbol_count == 1)
+        unordered_dict[0]->code_len = 1;
     
     // Now we ACTUALLY canonicalize the huffman code list.
     
@@ -765,7 +772,12 @@ static loh_bit_buffer huff_pack(uint8_t * data, size_t len)
     
     // despite all we've done to them, our huffman tree nodes still have their child pointers intact
     // so we can recursively free all our nodes all at once
-    free_huff_nodes(queue[0]);
+    if (queue_needs_free)
+        free_huff_nodes(queue[0]);
+    // if we only have 0 or 1 nodes, then the queue doesn't run, so we need to free them directly
+    // (only if there are actually any nodes, though)
+    else if (symbol_count == 1)
+        free_huff_nodes(unordered_dict[0]);
     
     return ret;
 }
