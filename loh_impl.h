@@ -933,6 +933,7 @@ static loh_byte_buffer lookback_decompress(const uint8_t * input, size_t input_l
                 size |= ((uint16_t)input[i++]) << 6;
             }
             
+            _LOH_CHECK_I_VS_LEN_OR_RETURN(size)
             bytes_push(&ret, &input[i], size);
             i += size;
         }
