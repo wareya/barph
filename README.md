@@ -29,29 +29,29 @@ file | compressed size | encode time (best of 3) | decode time (best of 3)
 white noise.bin | **27002 KB** | - | -
 white noise.bin.-9.lz4 | 27003 KB | 0.857s | **0.148s**
 white noise.bin.-9.zip | 27007 KB | 0.880s | 0.175s
-white noise.bin.loh | 27006 KB | **0.726s** | 0.249s
+white noise.bin.loh | 27006 KB | **0.726s** | 0.271s
 -|-|-|-
 oops all zeroes.bin | 27002 KB | - | -
 oops all zeroes.bin.-9.lz4 | 107 KB * | **0.136s** | **0.134s**
 oops all zeroes.bin.-9.zip | 27 KB | 0.173s | 0.139s
-oops all zeroes.bin.loh | **462 Bytes** | 0.139s | 0.140s
+oops all zeroes.bin.loh | **462 Bytes** | 0.139s | 0.152s
 -|-|-|-
 blake recorded 11.wav | 27002 KB | - | -
 blake recorded 11.wav.-9.lz4 | 26376 KB | 0.972s | **0.164s**
 blake recorded 11.wav.-9.zip | 25911 KB | 1.407s | 0.253s
-blake recorded 11.wav.loh | 26134 KB | **0.780s** | 0.372s
-blake recorded 11.wav.d4.loh | **24464 KB** | 0.801s | 0.358s
+blake recorded 11.wav.loh | 26134 KB | **0.780s** | 0.383s
+blake recorded 11.wav.d4.loh | **24464 KB** | 0.801s | 0.361s
 -|-|-|-
 cc0_photo.tga | 3729 KB | - | -
 cc0_photo.tga.-9.lz4 | 2754 KB | 0.292s | 0.132s
 cc0_photo.tga.-9.zip | 2466 KB | 0.308s | **0.065s**
-cc0_photo.tga.loh | 2775 KB | 0.166s | 0.103s
-cc0_photo.tga.l0d3.loh | **2223 KB** | **0.104s** | 0.097s
+cc0_photo.tga.loh | 2775 KB | 0.166s | 0.107s
+cc0_photo.tga.l0d3.loh | **2223 KB** | **0.104s** | 0.099s
 -|-|-|-
 unifont-jp.tga | 65537 KB | - | -
 unifont-jp.tga.-9.lz4 | 2716 KB | 4.957s | **0.198s**
 unifont-jp.tga.-9.zip | **1492 KB** | 16.706s | 0.263s
-unifont-jp.tga.loh | 2972 KB | **0.390s** | 0.369s
+unifont-jp.tga.loh | 2972 KB | **0.390s** | 0.381s
 -|-|-|-
 moby dick.txt | 1247 KB | - | -
 moby dick.txt.-9.lz4 | 583 KB | 0.195s | 0.120s
@@ -61,6 +61,6 @@ moby dick.txt.loh | 634 KB | **0.104s** | 0.103s
 Godot_v4.1.3-stable_win64.exe | 117560 KB | - | -
 Godot_v4.1.3-stable_win64.exe.-9.lz4 | 60210 KB | 4.161s | **0.303s**
 Godot_v4.1.3-stable_win64.exe.-9.zip | **53651 KB** | 11.367s | 1.163s
-Godot_v4.1.3-stable_win64.exe.loh | 63349 KB | **3.417s** | 1.555s
+Godot_v4.1.3-stable_win64.exe.loh | 63349 KB | **3.417s** | 1.597s
 
 \* LZ4 has a maximum compression ratio of 1:256-ish (because of how it stores long integers)

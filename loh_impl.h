@@ -1006,42 +1006,29 @@ static loh_byte_buffer huff_unpack(loh_bit_buffer * buf, int * error)
         return ret;
     }
     
-    
     uint8_t * in_data = buf->buffer.data;
     size_t in_data_len = buf->buffer.len;
-    size_t j = buf->byte_index;
-    uint8_t bits_left = 8;
-    uint64_t huff_bits = j < in_data_len ? in_data[j++] : 0;
     size_t i = 0;
-#define PROCESS_LOOP(source_expr)\
-    {\
-        uint16_t code_word = 0;\
-        uint16_t * max_code = max_codes + 1;\
-        for (size_t b = 0; b < 15; b++)\
-        {\
-            code_word = code_word | (huff_bits & 1);\
-            huff_bits >>= 1;\
-            bits_left -= 1;\
-            if (bits_left == 0)\
-            {\
-                huff_bits = source_expr;\
-                bits_left = 8;\
-            }\
-            if (code_word < *max_code++)\
-            {\
-                ret.data[i++] = symbols[code_word];\
-                break;\
-            }\
-            code_word <<= 1;\
-        }\
-    }
-    
-    // read as many input bytes as are safe to read without bounds checks
-    while (i < output_len && j + 8 < in_data_len) // a single code word will never consume anywhere near 8 bytes
-        PROCESS_LOOP(in_data[j++]);
-    // finish up with bounds checks
-    while (i < output_len)
-        PROCESS_LOOP(j < in_data_len ? in_data[j++] : 0);
+    uint16_t code_word = 0;
+    uint16_t * max_code = max_codes + 1;
+    // consume all remaining input bytes
+    for (size_t j = buf->byte_index; j < in_data_len; j++)
+    {
+        // operating on bit buffer input bytes/words is faster than operating on individual input bits
+        uint16_t word = in_data[j];
+        for (uint8_t b = 0; b < 8; b += 1)
+        {
+            code_word = code_word | (word & 1);
+            word >>= 1;
+            if (code_word < *max_code++)
+            {
+                ret.data[i++] = symbols[code_word];
+                code_word = 0;
+                max_code = max_codes + 1;
+            }
+            code_word <<= 1;
+        }
+     }
 
     ret.len = output_len;
 
