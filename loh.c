@@ -62,17 +62,33 @@ int main(int argc, char ** argv)
         
         FILE * f2 = fopen(argv[3], "wb");
         
+        // WHY IS THIS FASTER THAN JUST WRITING THE FILE ALL AT ONCE IF IT'S REALLY BIG
+        const size_t chunk_size = 1 << 20;
+        while (buf.len > chunk_size)
+        {
+            fwrite(buf.data, chunk_size, 1, f2);
+            buf.data += chunk_size;
+            buf.len -= chunk_size;
+        }
         fwrite(buf.data, buf.len, 1, f2);
         
         fclose(f2);
     }
     else if (argv[1][0] == 'x')
     {
-        buf.data = loh_decompress(buf.data, buf.len, &buf.len, 1);
+        buf.data = loh_decompress(buf.data, buf.len, &buf.len, 0);
         
         if (buf.data)
         {
             FILE * f2 = fopen(argv[3], "wb");
+            // WHY IS THIS FASTER THAN JUST WRITING THE FILE ALL AT ONCE IF IT'S REALLY BIG
+            const size_t chunk_size = 1 << 20;
+            while (buf.len > chunk_size)
+            {
+                fwrite(buf.data, chunk_size, 1, f2);
+                buf.data += chunk_size;
+                buf.len -= chunk_size;
+            }
             fwrite(buf.data, buf.len, 1, f2);
             fclose(f2);
         }
@@ -82,6 +98,8 @@ int main(int argc, char ** argv)
             exit(-1);
         }
     }
+    
+    free(raw_data);
     
     return 0;
 }
